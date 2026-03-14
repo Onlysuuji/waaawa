@@ -1,0 +1,21 @@
+# Gradle
+.gradle/
+build/
+out/
+
+# IntelliJ IDEA
+.idea/
+*.iml
+
+# Forge / Minecraft run files
+run/
+logs/
+crash-reports/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Java crash logs
+hs_err_pid*
+replay_pid*
