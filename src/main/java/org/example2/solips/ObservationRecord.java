@@ -12,6 +12,7 @@ public final class ObservationRecord {
     private final int[] clueIds;
     private final int[] clueLevels;
     private final String key;
+    private final String costKey;
 
     public ObservationRecord(Item item, int bookshelves, int[] costs, int[] clueIds, int[] clueLevels) {
         this.item = item;
@@ -20,6 +21,7 @@ public final class ObservationRecord {
         this.clueIds = Arrays.copyOf(clueIds, 3);
         this.clueLevels = Arrays.copyOf(clueLevels, 3);
         this.key = buildKey(item, bookshelves, costs, clueIds, clueLevels);
+        this.costKey = buildCostKey(bookshelves, costs);
     }
 
     public Item getItem() {
@@ -50,10 +52,18 @@ public final class ObservationRecord {
         return key;
     }
 
+    public String getCostKey() {
+        return costKey;
+    }
+
     public static String buildKey(Item item, int bookshelves, int[] costs, int[] clueIds, int[] clueLevels) {
         return item + "|" + bookshelves + "|"
                 + costs[0] + "," + costs[1] + "," + costs[2] + "|"
                 + clueIds[0] + "," + clueIds[1] + "," + clueIds[2] + "|"
                 + clueLevels[0] + "," + clueLevels[1] + "," + clueLevels[2];
+    }
+
+    public static String buildCostKey(int bookshelves, int[] costs) {
+        return bookshelves + "|" + costs[0] + "," + costs[1] + "," + costs[2];
     }
 }

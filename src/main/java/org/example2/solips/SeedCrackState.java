@@ -31,10 +31,12 @@ public final class SeedCrackState {
 
     private static volatile int resetEpoch = 0;
     private static volatile int trackedEnchantSeed = UNKNOWN_ENCHANT_SEED;
+    private static volatile boolean clueFilterInitialized = false;
 
     private static final List<ObservationRecord> appliedObservations = new ArrayList<>();
     private static final ArrayDeque<ObservationRecord> queuedObservations = new ArrayDeque<>();
     private static final Set<String> observationKeys = new HashSet<>();
+    private static final Set<String> processedCostKeys = new HashSet<>();
 
     private static final List<Integer> costCandidates = new ArrayList<>();
     private static final List<Integer> finalCandidates = new ArrayList<>();
@@ -61,10 +63,12 @@ public final class SeedCrackState {
         matched = 0;
 
         trackedEnchantSeed = UNKNOWN_ENCHANT_SEED;
+        clueFilterInitialized = false;
 
         appliedObservations.clear();
         queuedObservations.clear();
         observationKeys.clear();
+        processedCostKeys.clear();
         costCandidates.clear();
         finalCandidates.clear();
     }
@@ -111,22 +115,66 @@ public final class SeedCrackState {
         return true;
     }
 
-    public static synchronized boolean activateNextObservation(int expectedEpoch) {
+    public static synchronized ObservationRecord activateNextObservation(int expectedEpoch) {
         if (resetEpoch != expectedEpoch) {
-            return false;
+            return null;
         }
 
         ObservationRecord next = queuedObservations.pollFirst();
         if (next == null) {
-            return false;
+            return null;
         }
 
         appliedObservations.add(next);
-        finalCandidates.clear();
-        matched = 0;
         solved = false;
         solvedSeed = 0;
-        return true;
+        return next;
+    }
+
+    public static synchronized boolean hasProcessedCostKey(String costKey) {
+        return processedCostKeys.contains(costKey);
+    }
+
+    public static synchronized void markCostKeyProcessed(String costKey, int expectedEpoch) {
+        if (resetEpoch != expectedEpoch) {
+            return;
+        }
+        processedCostKeys.add(costKey);
+    }
+
+    public static synchronized List<Integer> getCostCandidatesSnapshot(int expectedEpoch) {
+        if (resetEpoch != expectedEpoch) {
+            return List.of();
+        }
+        return new ArrayList<>(costCandidates);
+    }
+
+    public static synchronized List<Integer> getFinalCandidatesSnapshot(int expectedEpoch) {
+        if (resetEpoch != expectedEpoch) {
+            return List.of();
+        }
+        return new ArrayList<>(finalCandidates);
+    }
+
+    public static synchronized List<Integer> getClueSourceSnapshot(int expectedEpoch) {
+        if (resetEpoch != expectedEpoch) {
+            return List.of();
+        }
+        if (clueFilterInitialized) {
+            return new ArrayList<>(finalCandidates);
+        }
+        return new ArrayList<>(costCandidates);
+    }
+
+    public static synchronized boolean isClueFilterInitialized() {
+        return clueFilterInitialized;
+    }
+
+    public static synchronized void markClueFilterInitialized(int expectedEpoch) {
+        if (resetEpoch != expectedEpoch) {
+            return;
+        }
+        clueFilterInitialized = true;
     }
 
     public static synchronized List<ObservationRecord> getAppliedObservationsSnapshot() {
@@ -169,7 +217,7 @@ public final class SeedCrackState {
         } else {
             phase = Phase.CLUE_FILTER;
             phaseChecked = 0L;
-            phaseTotal = costCandidates.size();
+            phaseTotal = clueFilterInitialized ? finalCandidates.size() : costCandidates.size();
         }
 
         costMatched = costCandidates.size();
@@ -207,11 +255,16 @@ public final class SeedCrackState {
         solvedSeed = 0;
     }
 
-    public static synchronized List<Integer> getCostCandidatesSnapshot(int expectedEpoch) {
+    public static synchronized void replaceFinalCandidates(List<Integer> newCandidates, int expectedEpoch) {
         if (resetEpoch != expectedEpoch) {
-            return List.of();
+            return;
         }
-        return new ArrayList<>(costCandidates);
+
+        finalCandidates.clear();
+        finalCandidates.addAll(newCandidates);
+        matched = finalCandidates.size();
+        solved = false;
+        solvedSeed = 0;
     }
 
     public static synchronized void finishCostPhase(int expectedEpoch) {
@@ -222,11 +275,9 @@ public final class SeedCrackState {
         cursor = TOTAL_SEEDS;
         phase = Phase.CLUE_FILTER;
         phaseChecked = 0L;
-        phaseTotal = costCandidates.size();
+        phaseTotal = clueFilterInitialized ? finalCandidates.size() : costCandidates.size();
         costMatched = costCandidates.size();
-
-        finalCandidates.clear();
-        matched = 0;
+        matched = finalCandidates.size();
         solved = false;
         solvedSeed = 0;
     }
@@ -236,13 +287,15 @@ public final class SeedCrackState {
             return;
         }
 
+        int clueSourceSize = clueFilterInitialized ? finalCandidates.size() : costCandidates.size();
+
         finalCandidates.clear();
         matched = 0;
 
         if (cursor >= TOTAL_SEEDS) {
             phase = Phase.CLUE_FILTER;
             phaseChecked = 0L;
-            phaseTotal = costCandidates.size();
+            phaseTotal = clueSourceSize;
         }
 
         solved = false;

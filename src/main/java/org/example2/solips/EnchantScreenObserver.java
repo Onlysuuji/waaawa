@@ -2,6 +2,7 @@ package org.example2.solips;
 
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.screens.inventory.EnchantmentScreen;
+import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.inventory.EnchantmentMenu;
 import net.minecraft.world.item.ItemStack;
 import net.neoforged.api.distmarker.Dist;
@@ -26,12 +27,15 @@ public class EnchantScreenObserver {
     public static void onClientTick(ClientTickEvent.Post event) {
         Minecraft mc = Minecraft.getInstance();
 
-        if (mc.player != null) {
-            int currentEnchantSeed = mc.player.getEnchantmentSeed();
+        Integer currentEnchantSeed = getAuthoritativeEnchantSeed(mc);
+        if (currentEnchantSeed != null) {
             boolean reset = SeedCrackState.updateEnchantSeedAndCheckReset(currentEnchantSeed);
             if (reset) {
+                System.out.println("[seed-reset] newEnchantSeed=" + Integer.toUnsignedString(currentEnchantSeed));
                 ObservedEnchantState.clear();
                 resetPending();
+                wasInEnchantScreen = mc.screen instanceof EnchantmentScreen;
+                return;
             }
         }
 
@@ -107,5 +111,27 @@ public class EnchantScreenObserver {
         }
 
         EnchantSeedCracker.submitObservation(observation);
+    }
+
+    private static Integer getAuthoritativeEnchantSeed(Minecraft mc) {
+        if (mc.player == null) {
+            return null;
+        }
+
+        if (mc.hasSingleplayerServer()) {
+            var server = mc.getSingleplayerServer();
+            if (server == null) {
+                return null;
+            }
+
+            ServerPlayer serverPlayer = server.getPlayerList().getPlayer(mc.player.getUUID());
+            if (serverPlayer == null) {
+                return null;
+            }
+
+            return serverPlayer.getEnchantmentSeed();
+        }
+
+        return mc.player.getEnchantmentSeed();
     }
 }

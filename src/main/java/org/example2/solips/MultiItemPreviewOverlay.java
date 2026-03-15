@@ -66,8 +66,34 @@ public class MultiItemPreviewOverlay {
             y += font.lineHeight + 2;
         }
 
-        int clientSeed = mc.player.getEnchantmentSeed();
-        graphics.drawString(font, "clientSeed=" + Integer.toUnsignedString(clientSeed), left, y, 0xFFFFFF, false);
-        y += font.lineHeight + 2;
+        Integer actualSeed = getAuthoritativeSingleplayerSeed(mc);
+        if (actualSeed != null) {
+            graphics.drawString(font, "answerSeed=" + Integer.toUnsignedString(actualSeed), left, y, 0x55FF55, false);
+            y += font.lineHeight + 2;
+        } else if (mc.hasSingleplayerServer()) {
+            graphics.drawString(font, "answerSeed=(loading)", left, y, 0xFFFF55, false);
+            y += font.lineHeight + 2;
+        } else {
+            graphics.drawString(font, "answerSeed=(multiplayer)", left, y, 0x888888, false);
+            y += font.lineHeight + 2;
+        }
+    }
+
+    private static Integer getAuthoritativeSingleplayerSeed(Minecraft mc) {
+        if (!mc.hasSingleplayerServer() || mc.player == null) {
+            return null;
+        }
+
+        var server = mc.getSingleplayerServer();
+        if (server == null) {
+            return null;
+        }
+
+        var serverPlayer = server.getPlayerList().getPlayer(mc.player.getUUID());
+        if (serverPlayer == null) {
+            return null;
+        }
+
+        return serverPlayer.getEnchantmentSeed();
     }
 }
