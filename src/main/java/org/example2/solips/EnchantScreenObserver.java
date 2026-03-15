@@ -31,6 +31,7 @@ public class EnchantScreenObserver {
 
         if (!inEnchantScreen) {
             if (wasInEnchantScreen) {
+                EnchantSeedCracker.stopCrack();
                 ObservedEnchantState.clear();
                 SeedCrackState.resetAll();
                 resetPending();

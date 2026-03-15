@@ -6,25 +6,33 @@ import java.util.List;
 import java.util.Set;
 
 public final class SeedCrackState {
-
     private static volatile boolean running = false;
     private static volatile boolean solved = false;
     private static volatile int solvedSeed = 0;
-    private static volatile int checked = 0;
+    private static volatile long checked = 0L;
     private static volatile int matched = 0;
+
+    private static volatile boolean actualSeedKnown = false;
+    private static volatile int actualSeed = 0;
+    private static volatile boolean actualSeedPassesLatest = false;
+    private static volatile boolean actualSeedPassesAll = false;
+    private static volatile int actualFailedObservationIndex = -1;
+    private static volatile String actualMismatchReason = "";
 
     private static final List<Integer> candidates = new ArrayList<>();
     private static final List<ObservationRecord> observations = new ArrayList<>();
     private static final Set<String> observationKeys = new HashSet<>();
 
-    private SeedCrackState() {}
+    private SeedCrackState() {
+    }
 
     public static synchronized void resetAll() {
         running = false;
         solved = false;
         solvedSeed = 0;
-        checked = 0;
+        checked = 0L;
         matched = 0;
+        clearActualSeedVerificationLocked();
         candidates.clear();
         observations.clear();
         observationKeys.clear();
@@ -34,8 +42,9 @@ public final class SeedCrackState {
         running = true;
         solved = false;
         solvedSeed = 0;
-        checked = 0;
-        matched = candidates.size();
+        checked = 0L;
+        matched = 0;
+        clearActualSeedVerificationLocked();
     }
 
     public static synchronized void finishRun() {
@@ -86,6 +95,31 @@ public final class SeedCrackState {
         solvedSeed = solved ? candidates.get(0) : 0;
     }
 
+    public static synchronized void setActualSeedVerification(
+            int seed,
+            boolean known,
+            boolean passesLatest,
+            boolean passesAll,
+            int failedObservationIndex,
+            String mismatchReason
+    ) {
+        actualSeed = seed;
+        actualSeedKnown = known;
+        actualSeedPassesLatest = passesLatest;
+        actualSeedPassesAll = passesAll;
+        actualFailedObservationIndex = failedObservationIndex;
+        actualMismatchReason = mismatchReason != null ? mismatchReason : "";
+    }
+
+    private static void clearActualSeedVerificationLocked() {
+        actualSeedKnown = false;
+        actualSeed = 0;
+        actualSeedPassesLatest = false;
+        actualSeedPassesAll = false;
+        actualFailedObservationIndex = -1;
+        actualMismatchReason = "";
+    }
+
     public static boolean isRunning() {
         return running;
     }
@@ -98,21 +132,45 @@ public final class SeedCrackState {
         return solvedSeed;
     }
 
-    public static int getChecked() {
+    public static long getChecked() {
         return checked;
+    }
+
+    public static void setChecked(long value) {
+        checked = value;
     }
 
     public static int getMatched() {
         return matched;
     }
 
-    public static void setChecked(int value) {
-        checked = value;
-    }
-
     public static int getObservationCount() {
         synchronized (SeedCrackState.class) {
             return observations.size();
         }
+    }
+
+    public static boolean isActualSeedKnown() {
+        return actualSeedKnown;
+    }
+
+    public static int getActualSeed() {
+        return actualSeed;
+    }
+
+    public static boolean getActualSeedPassesLatest() {
+        return actualSeedPassesLatest;
+    }
+
+    public static boolean getActualSeedPassesAll() {
+        return actualSeedPassesAll;
+    }
+
+    public static int getActualFailedObservationIndex() {
+        return actualFailedObservationIndex;
+    }
+
+    public static String getActualMismatchReason() {
+        return actualMismatchReason;
     }
 }
