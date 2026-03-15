@@ -27,6 +27,12 @@ public class MultiItemPreviewOverlay {
         graphics.drawString(font, "observations=" + SeedCrackState.getObservationCount(), left, y, 0xFFFFFF, false);
         y += font.lineHeight + 2;
 
+        graphics.drawString(font, "applied=" + SeedCrackState.getAppliedObservationCount(), left, y, 0xFFFFFF, false);
+        y += font.lineHeight + 2;
+
+        graphics.drawString(font, "queued=" + SeedCrackState.getQueuedObservationCount(), left, y, 0xFFFFFF, false);
+        y += font.lineHeight + 2;
+
         graphics.drawString(font, "running=" + SeedCrackState.isRunning(), left, y, 0xFFFFFF, false);
         y += font.lineHeight + 2;
 

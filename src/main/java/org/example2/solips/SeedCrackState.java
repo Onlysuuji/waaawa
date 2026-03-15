@@ -1,5 +1,6 @@
 package org.example2.solips;
 
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
@@ -28,11 +29,11 @@ public final class SeedCrackState {
     private static volatile int costMatched = 0;
     private static volatile int matched = 0;
 
-    private static volatile int observationVersion = 0;
     private static volatile int resetEpoch = 0;
     private static volatile int trackedEnchantSeed = UNKNOWN_ENCHANT_SEED;
 
-    private static final List<ObservationRecord> observations = new ArrayList<>();
+    private static final List<ObservationRecord> appliedObservations = new ArrayList<>();
+    private static final ArrayDeque<ObservationRecord> queuedObservations = new ArrayDeque<>();
     private static final Set<String> observationKeys = new HashSet<>();
 
     private static final List<Integer> costCandidates = new ArrayList<>();
@@ -43,6 +44,10 @@ public final class SeedCrackState {
 
     public static synchronized void resetAll() {
         resetEpoch++;
+        clearAllState();
+    }
+
+    private static void clearAllState() {
         running = false;
         solved = false;
         solvedSeed = 0;
@@ -55,10 +60,10 @@ public final class SeedCrackState {
         costMatched = 0;
         matched = 0;
 
-        observationVersion = 0;
         trackedEnchantSeed = UNKNOWN_ENCHANT_SEED;
 
-        observations.clear();
+        appliedObservations.clear();
+        queuedObservations.clear();
         observationKeys.clear();
         costCandidates.clear();
         finalCandidates.clear();
@@ -80,25 +85,8 @@ public final class SeedCrackState {
 
         trackedEnchantSeed = currentEnchantSeed;
         resetEpoch++;
-
-        running = false;
-        solved = false;
-        solvedSeed = 0;
-
-        phase = Phase.IDLE;
-        phaseChecked = 0L;
-        phaseTotal = TOTAL_SEEDS;
-
-        cursor = 0L;
-        costMatched = 0;
-        matched = 0;
-
-        observationVersion = 0;
-
-        observations.clear();
-        observationKeys.clear();
-        costCandidates.clear();
-        finalCandidates.clear();
+        clearAllState();
+        trackedEnchantSeed = currentEnchantSeed;
         return true;
     }
 
@@ -117,21 +105,44 @@ public final class SeedCrackState {
         }
 
         observationKeys.add(key);
-        observations.add(observation);
-        observationVersion++;
+        queuedObservations.addLast(observation);
+        solved = false;
+        solvedSeed = 0;
         return true;
     }
 
-    public static synchronized List<ObservationRecord> getObservationsSnapshot() {
-        return new ArrayList<>(observations);
+    public static synchronized boolean activateNextObservation(int expectedEpoch) {
+        if (resetEpoch != expectedEpoch) {
+            return false;
+        }
+
+        ObservationRecord next = queuedObservations.pollFirst();
+        if (next == null) {
+            return false;
+        }
+
+        appliedObservations.add(next);
+        finalCandidates.clear();
+        matched = 0;
+        solved = false;
+        solvedSeed = 0;
+        return true;
     }
 
-    public static synchronized int getObservationVersion() {
-        return observationVersion;
+    public static synchronized List<ObservationRecord> getAppliedObservationsSnapshot() {
+        return new ArrayList<>(appliedObservations);
     }
 
     public static synchronized int getObservationCount() {
-        return observations.size();
+        return appliedObservations.size() + queuedObservations.size();
+    }
+
+    public static synchronized int getAppliedObservationCount() {
+        return appliedObservations.size();
+    }
+
+    public static synchronized int getQueuedObservationCount() {
+        return queuedObservations.size();
     }
 
     public static synchronized int getResetEpoch() {
@@ -192,13 +203,6 @@ public final class SeedCrackState {
         costCandidates.clear();
         costCandidates.addAll(newCandidates);
         costMatched = costCandidates.size();
-
-        if (phase == Phase.CLUE_FILTER || phase == Phase.DONE) {
-            phase = Phase.CLUE_FILTER;
-            phaseChecked = 0L;
-            phaseTotal = costCandidates.size();
-        }
-
         solved = false;
         solvedSeed = 0;
     }
@@ -267,17 +271,29 @@ public final class SeedCrackState {
         solvedSeed = 0;
     }
 
-    public static synchronized void finishRun(int expectedEpoch) {
+    public static synchronized void finishObservationRun(int expectedEpoch) {
+        if (resetEpoch != expectedEpoch) {
+            return;
+        }
+
+        phase = Phase.DONE;
+        phaseChecked = phaseTotal;
+        costMatched = costCandidates.size();
+        matched = finalCandidates.size();
+        solved = finalCandidates.size() == 1;
+        solvedSeed = solved ? finalCandidates.get(0) : 0;
+    }
+
+    public static synchronized void finishAllRuns(int expectedEpoch) {
         if (resetEpoch != expectedEpoch) {
             return;
         }
 
         running = false;
-        phase = Phase.DONE;
-        phaseChecked = phaseTotal;
+        phase = appliedObservations.isEmpty() ? Phase.IDLE : Phase.DONE;
+        phaseChecked = phase == Phase.IDLE ? 0L : phaseTotal;
         costMatched = costCandidates.size();
         matched = finalCandidates.size();
-
         solved = finalCandidates.size() == 1;
         solvedSeed = solved ? finalCandidates.get(0) : 0;
     }
