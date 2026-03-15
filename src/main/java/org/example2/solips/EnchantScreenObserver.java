@@ -13,9 +13,7 @@ import java.util.Arrays;
 
 @EventBusSubscriber(modid = Solips.MODID, value = Dist.CLIENT)
 public class EnchantScreenObserver {
-
     private static boolean wasInEnchantScreen = false;
-
     private static String pendingKey = null;
     private static int pendingTicks = 0;
 
@@ -27,13 +25,21 @@ public class EnchantScreenObserver {
     @SubscribeEvent
     public static void onClientTick(ClientTickEvent.Post event) {
         Minecraft mc = Minecraft.getInstance();
+
+        if (mc.player != null) {
+            int currentEnchantSeed = mc.player.getEnchantmentSeed();
+            boolean reset = SeedCrackState.updateEnchantSeedAndCheckReset(currentEnchantSeed);
+            if (reset) {
+                ObservedEnchantState.clear();
+                resetPending();
+            }
+        }
+
         boolean inEnchantScreen = mc.screen instanceof EnchantmentScreen;
 
         if (!inEnchantScreen) {
             if (wasInEnchantScreen) {
-                EnchantSeedCracker.stopCrack();
                 ObservedEnchantState.clear();
-                SeedCrackState.resetAll();
                 resetPending();
             }
             wasInEnchantScreen = false;
@@ -58,8 +64,8 @@ public class EnchantScreenObserver {
         int[] costs = new int[3];
         int[] clueIds = new int[3];
         int[] clueLevels = new int[3];
-
         boolean usable = false;
+
         for (int i = 0; i < 3; i++) {
             costs[i] = menu.costs[i];
             clueIds[i] = menu.enchantClue[i];
@@ -70,7 +76,6 @@ public class EnchantScreenObserver {
             }
         }
 
-        // サーバー同期直後の未確定状態は捨てる
         if (!usable) {
             return;
         }
@@ -78,7 +83,6 @@ public class EnchantScreenObserver {
         int bookshelves = 15;
         String key = ObservationRecord.buildKey(stack.getItem(), bookshelves, costs, clueIds, clueLevels);
 
-        // 同じ観測が連続で見えた回数を数える
         if (!key.equals(pendingKey)) {
             pendingKey = key;
             pendingTicks = 1;
@@ -86,19 +90,22 @@ public class EnchantScreenObserver {
         }
 
         pendingTicks++;
-
-        // 2〜3tick 安定してから確定
         if (pendingTicks < 3) {
             return;
         }
 
         ObservedEnchantState.set(stack.getItem(), bookshelves, costs, clueIds, clueLevels);
 
-        if (!SeedCrackState.hasObservationKey(key)) {
+        ObservationRecord observation =
+                new ObservationRecord(stack.getItem(), bookshelves, costs, clueIds, clueLevels);
+
+        if (!SeedCrackState.hasObservationKey(observation.getKey())) {
             System.out.println("[obs-debug] commit item=" + stack.getItem()
                     + " costs=" + Arrays.toString(costs)
                     + " clueIds=" + Arrays.toString(clueIds)
                     + " clueLv=" + Arrays.toString(clueLevels));
         }
+
+        EnchantSeedCracker.submitObservation(observation);
     }
 }

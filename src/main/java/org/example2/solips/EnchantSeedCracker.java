@@ -11,72 +11,38 @@ import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.enchantment.Enchantment;
 import net.minecraft.world.item.enchantment.EnchantmentHelper;
 import net.minecraft.world.item.enchantment.EnchantmentInstance;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.atomic.AtomicBoolean;
 
 import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Collections;
 import java.util.List;
-import java.util.concurrent.*;
-import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.StreamSupport;
 
 public final class EnchantSeedCracker {
-    private static final long FULL_RANGE_SIZE = 0x1_0000_0000L;
-    private static final long CHUNK_SIZE = 1L << 22; // 4,194,304
-    private static final long PROGRESS_STEP = 1L << 20; // 1,048,576
+    private static final long COST_FLUSH_INTERVAL = 65536L;
+    private static final int CLUE_FLUSH_INTERVAL = 4096;
 
-    private static Thread worker;
-    private static volatile ExecutorService searchPool;
-    private static final AtomicBoolean cancelRequested = new AtomicBoolean(false);
+    private static volatile Thread worker;
+    private static volatile int workerEpoch = Integer.MIN_VALUE;
 
     private EnchantSeedCracker() {
     }
 
-    private static final class ActualSeedCheckResult {
-        final boolean passesLatest;
-        final boolean passesAll;
-        final int failedObservationIndex;
-        final String mismatchReason;
+    private static final class PreparedObservation {
+        final ItemStack stack;
+        final int bookshelves;
+        final int[] costs;
+        final int[] clueIds;
+        final int[] clueLevels;
 
-        ActualSeedCheckResult(
-                boolean passesLatest,
-                boolean passesAll,
-                int failedObservationIndex,
-                String mismatchReason
-        ) {
-            this.passesLatest = passesLatest;
-            this.passesAll = passesAll;
-            this.failedObservationIndex = failedObservationIndex;
-            this.mismatchReason = mismatchReason != null ? mismatchReason : "";
+        PreparedObservation(ObservationRecord record) {
+            this.stack = record.createStack();
+            this.bookshelves = record.getBookshelves();
+            this.costs = record.getCosts();
+            this.clueIds = record.getClueIds();
+            this.clueLevels = record.getClueLevels();
         }
     }
 
-    public static void stopCrack() {
-        cancelRequested.set(true);
-
-        Thread t = worker;
-        if (t != null) {
-            t.interrupt();
-        }
-
-        ExecutorService pool = searchPool;
-        if (pool != null) {
-            pool.shutdownNow();
-        }
-    }
-
-    private static boolean shouldStop() {
-        return cancelRequested.get() || Thread.currentThread().isInterrupted();
-    }
-
-    public static void startCrack() {
-        if (SeedCrackState.isRunning()) {
-            return;
-        }
-
-        ObservationRecord observation = ObservedEnchantState.snapshot();
+    public static void submitObservation(ObservationRecord observation) {
         if (observation == null) {
             return;
         }
@@ -86,282 +52,195 @@ public final class EnchantSeedCracker {
             return;
         }
 
+        ensureWorkerRunning();
+    }
+
+    public static void ensureWorkerRunning() {
         Minecraft mc = Minecraft.getInstance();
         if (mc.level == null) {
             return;
         }
+        if (SeedCrackState.getObservationCount() == 0) {
+            return;
+        }
 
+        int epoch = SeedCrackState.getResetEpoch();
         RegistryAccess registryAccess = mc.level.registryAccess();
-        SeedCrackState.beginRun();
 
-        worker = new Thread(() -> runCrack(registryAccess), "EnchantSeedCracker");
-        worker.setDaemon(true);
-        worker.start();
-    }
-
-    private static void runCrack(RegistryAccess registryAccess) {
-        try {
-            Registry<Enchantment> enchantmentRegistry = registryAccess.registryOrThrow(Registries.ENCHANTMENT);
-            List<ObservationRecord> observations = SeedCrackState.getObservationsSnapshot();
-
-            if (observations.isEmpty()) {
-                SeedCrackState.replaceCandidates(List.of());
+        synchronized (EnchantSeedCracker.class) {
+            if (worker != null && worker.isAlive() && workerEpoch == epoch) {
                 return;
             }
 
-            int actualSeed = getAuthoritativeEnchantSeed();
-            ActualSeedCheckResult actualCheck = verifyActualSeed(actualSeed, observations, enchantmentRegistry);
+            workerEpoch = epoch;
+            SeedCrackState.beginRun(epoch);
 
-            SeedCrackState.setActualSeedVerification(
-                    actualSeed,
-                    actualSeed != -1,
-                    actualCheck.passesLatest,
-                    actualCheck.passesAll,
-                    actualCheck.failedObservationIndex,
-                    actualCheck.mismatchReason
-            );
-
-            System.out.println("[seed-debug] actualSeed=" + actualSeed
-                    + " hex=0x" + Integer.toHexString(actualSeed)
-                    + " actualMatchesLatest=" + actualCheck.passesLatest
-                    + " actualMatchesAll=" + actualCheck.passesAll
-                    + " failedIndex=" + actualCheck.failedObservationIndex
-                    + " reason=" + actualCheck.mismatchReason);
-
-            if (!actualCheck.passesAll && actualCheck.failedObservationIndex >= 0) {
-                dumpActualPreview(actualSeed, observations.get(actualCheck.failedObservationIndex), enchantmentRegistry);
-            }
-
-            List<Integer> previousCandidates = SeedCrackState.getCandidatesSnapshot();
-            List<Integer> nextCandidates;
-
-            if (!previousCandidates.isEmpty()) {
-                ObservationRecord latest = observations.get(observations.size() - 1);
-                nextCandidates = refilterPreviousCandidates(previousCandidates, latest, enchantmentRegistry);
-            } else {
-                nextCandidates = fullSearch32(observations, enchantmentRegistry);
-            }
-
-            SeedCrackState.replaceCandidates(nextCandidates);
-            System.out.println("[run-debug] nextCandidates=" + nextCandidates.size());
-            if (!nextCandidates.isEmpty()) {
-                int preview = Math.min(nextCandidates.size(), 10);
-                System.out.println("[run-debug] firstCandidates=" + nextCandidates.subList(0, preview));
-            }
-        } finally {
-            searchPool = null;
-            worker = null;
-            SeedCrackState.finishRun();
+            worker = new Thread(() -> runCrack(registryAccess, epoch), "EnchantSeedCracker");
+            worker.setDaemon(true);
+            worker.start();
         }
     }
 
-    private static List<Integer> refilterPreviousCandidates(
-            List<Integer> previousCandidates,
-            ObservationRecord latest,
-            Registry<Enchantment> enchantmentRegistry
-    ) {
-        List<Integer> nextCandidates = new ArrayList<>();
-        long checkedLocal = 0L;
-        long nextProgress = PROGRESS_STEP;
+    private static void runCrack(RegistryAccess registryAccess, int expectedEpoch) {
+        try {
+            Registry<Enchantment> enchantmentRegistry =
+                    registryAccess.registryOrThrow(Registries.ENCHANTMENT);
 
-        for (int seed : previousCandidates) {
-            if (shouldStop()) {
-                return List.of();
+            List<Holder<Enchantment>> holders = StreamSupport
+                    .stream(enchantmentRegistry.getTagOrEmpty(EnchantmentTags.IN_ENCHANTING_TABLE).spliterator(), false)
+                    .map(holder -> (Holder<Enchantment>) holder)
+                    .toList();
+
+            List<ObservationRecord> observationRecords = SeedCrackState.getObservationsSnapshot();
+            if (observationRecords.isEmpty()) {
+                SeedCrackState.finishRun(expectedEpoch);
+                return;
             }
 
-            checkedLocal++;
-            if (matchesObservation(seed, latest, enchantmentRegistry)) {
-                nextCandidates.add(seed);
+            List<PreparedObservation> observations = prepareObservations(observationRecords);
+            int localObservationVersion = SeedCrackState.getObservationVersion();
+
+            if (SeedCrackState.getCursor() > 0 || SeedCrackState.getCostMatched() > 0) {
+                refilterCostCandidates(observations, expectedEpoch);
             }
 
-            if (checkedLocal >= nextProgress) {
-                SeedCrackState.setChecked(checkedLocal);
-                nextProgress += PROGRESS_STEP;
-            }
-        }
+            long cursor = SeedCrackState.getCursor();
+            List<Integer> costBatch = new ArrayList<>(256);
 
-        SeedCrackState.setChecked(checkedLocal);
-        return nextCandidates;
-    }
-
-    private static List<Integer> fullSearch32(
-            List<ObservationRecord> observations,
-            Registry<Enchantment> enchantmentRegistry
-    ) {
-        int workerCount = Math.max(1, Runtime.getRuntime().availableProcessors() - 1);
-        ExecutorService pool = Executors.newFixedThreadPool(workerCount);
-        searchPool = pool;
-        AtomicLong nextBase = new AtomicLong(0L);
-        AtomicLong checkedCounter = new AtomicLong(0L);
-        List<Integer> matches = Collections.synchronizedList(new ArrayList<>());
-        List<Future<?>> futures = new ArrayList<>();
-
-        for (int i = 0; i < workerCount; i++) {
-            futures.add(pool.submit(() -> {
-                List<Integer> localMatches = new ArrayList<>();
-                long localProgress = 0L;
-
-                while (!shouldStop()) {
-                    long start = nextBase.getAndAdd(CHUNK_SIZE);
-                    if (start >= FULL_RANGE_SIZE) {
-                        break;
-                    }
-
-                    long end = Math.min(FULL_RANGE_SIZE, start + CHUNK_SIZE);
-
-                    for (long u = start; u < end; u++) {
-                        if (shouldStop()) {
-                            return;
-                        }
-
-                        int seed = (int) u;
-
-                        if (!matchesCostsAll(seed, observations)) {
-                            continue;
-                        }
-                        if (!matchesCluesAll(seed, observations, enchantmentRegistry)) {
-                            continue;
-                        }
-
-                        localMatches.add(seed);
-                    }
-
-                    if (!localMatches.isEmpty()) {
-                        matches.addAll(localMatches);
-                        localMatches.clear();
-                    }
-
-                    localProgress += (end - start);
-                    long checkedNow = checkedCounter.addAndGet(end - start);
-                    if (checkedNow >= PROGRESS_STEP || localProgress >= PROGRESS_STEP) {
-                        SeedCrackState.setChecked(checkedNow);
-                        localProgress = 0L;
-                    }
+            while (cursor < SeedCrackState.TOTAL_SEEDS) {
+                if (SeedCrackState.getResetEpoch() != expectedEpoch) {
+                    return;
                 }
-            }));
+
+                int currentVersion = SeedCrackState.getObservationVersion();
+                if (currentVersion != localObservationVersion) {
+                    if (!costBatch.isEmpty()) {
+                        SeedCrackState.appendCostMatches(costBatch, cursor, expectedEpoch);
+                        costBatch = new ArrayList<>(256);
+                    }
+
+                    observationRecords = SeedCrackState.getObservationsSnapshot();
+                    observations = prepareObservations(observationRecords);
+                    refilterCostCandidates(observations, expectedEpoch);
+                    localObservationVersion = currentVersion;
+                }
+
+                int seed = (int) cursor;
+                if (matchesAllCosts(seed, observations)) {
+                    costBatch.add(seed);
+                }
+                cursor++;
+
+                if ((cursor & (COST_FLUSH_INTERVAL - 1L)) == 0L) {
+                    SeedCrackState.appendCostMatches(costBatch, cursor, expectedEpoch);
+                    costBatch = new ArrayList<>(256);
+                }
+            }
+
+            SeedCrackState.appendCostMatches(costBatch, cursor, expectedEpoch);
+            SeedCrackState.finishCostPhase(expectedEpoch);
+
+            List<Integer> costCandidates = SeedCrackState.getCostCandidatesSnapshot(expectedEpoch);
+            int processed = 0;
+            List<Integer> finalBatch = new ArrayList<>(128);
+
+            while (processed < costCandidates.size()) {
+                if (SeedCrackState.getResetEpoch() != expectedEpoch) {
+                    return;
+                }
+
+                int currentVersion = SeedCrackState.getObservationVersion();
+                if (currentVersion != localObservationVersion) {
+                    if (!finalBatch.isEmpty()) {
+                        SeedCrackState.appendFinalMatches(finalBatch, processed, costCandidates.size(), expectedEpoch);
+                        finalBatch = new ArrayList<>(128);
+                    }
+
+                    observationRecords = SeedCrackState.getObservationsSnapshot();
+                    observations = prepareObservations(observationRecords);
+                    refilterCostCandidates(observations, expectedEpoch);
+                    SeedCrackState.clearFinalCandidates(expectedEpoch);
+
+                    costCandidates = SeedCrackState.getCostCandidatesSnapshot(expectedEpoch);
+                    processed = 0;
+                    localObservationVersion = currentVersion;
+                    continue;
+                }
+
+                int seed = costCandidates.get(processed);
+                if (matchesAllClues(seed, observations, enchantmentRegistry, holders)) {
+                    finalBatch.add(seed);
+                }
+                processed++;
+
+                if (processed % CLUE_FLUSH_INTERVAL == 0) {
+                    SeedCrackState.appendFinalMatches(finalBatch, processed, costCandidates.size(), expectedEpoch);
+                    finalBatch = new ArrayList<>(128);
+                }
+            }
+
+            SeedCrackState.appendFinalMatches(finalBatch, processed, costCandidates.size(), expectedEpoch);
+            SeedCrackState.finishRun(expectedEpoch);
+        } finally {
+            synchronized (EnchantSeedCracker.class) {
+                if (Thread.currentThread() == worker) {
+                    worker = null;
+                }
+            }
+        }
+    }
+
+    private static List<PreparedObservation> prepareObservations(List<ObservationRecord> records) {
+        List<PreparedObservation> list = new ArrayList<>(records.size());
+        for (ObservationRecord record : records) {
+            list.add(new PreparedObservation(record));
+        }
+        return list;
+    }
+
+    private static void refilterCostCandidates(List<PreparedObservation> observations, int expectedEpoch) {
+        List<Integer> current = SeedCrackState.getCostCandidatesSnapshot(expectedEpoch);
+        if (current.isEmpty()) {
+            SeedCrackState.clearFinalCandidates(expectedEpoch);
+            return;
         }
 
-        for (Future<?> future : futures) {
-            try {
-                future.get();
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                break;
-            } catch (ExecutionException e) {
-                throw new RuntimeException("fullSearch32 failed", e);
+        List<Integer> next = new ArrayList<>(current.size());
+        for (int seed : current) {
+            if (matchesAllCosts(seed, observations)) {
+                next.add(seed);
             }
         }
 
-        pool.shutdownNow();
-        SeedCrackState.setChecked(FULL_RANGE_SIZE);
-        return new ArrayList<>(matches);
+        SeedCrackState.replaceCostCandidates(next, expectedEpoch);
+        SeedCrackState.clearFinalCandidates(expectedEpoch);
     }
 
-    private static boolean matchesCostsAll(int seed, List<ObservationRecord> observations) {
-        for (ObservationRecord observation : observations) {
-            ItemStack stack = observation.createStack();
-            int[] actualCosts = computeDisplayedCosts(stack, observation.getBookshelves(), seed);
-            if (!Arrays.equals(actualCosts, observation.getCosts())) {
+    private static boolean matchesAllCosts(int seed, List<PreparedObservation> observations) {
+        for (PreparedObservation observation : observations) {
+            if (!matchesCosts(observation, seed)) {
                 return false;
             }
         }
         return true;
     }
 
-    private static boolean matchesCluesAll(
-            int seed,
-            List<ObservationRecord> observations,
-            Registry<Enchantment> enchantmentRegistry
-    ) {
-        for (ObservationRecord observation : observations) {
-            ItemStack stack = observation.createStack();
-            if (!matchesClues(
-                    stack,
-                    seed,
-                    observation.getCosts(),
-                    observation.getClueIds(),
-                    observation.getClueLevels(),
-                    enchantmentRegistry
-            )) {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    private static boolean matchesObservation(
-            int seed,
-            ObservationRecord observation,
-            Registry<Enchantment> enchantmentRegistry
-    ) {
-        ItemStack stack = observation.createStack();
-
-        int[] actualCosts = computeDisplayedCosts(stack, observation.getBookshelves(), seed);
-        if (!Arrays.equals(actualCosts, observation.getCosts())) {
-            return false;
-        }
-
-        return matchesClues(
-                stack,
-                seed,
-                observation.getCosts(),
-                observation.getClueIds(),
-                observation.getClueLevels(),
-                enchantmentRegistry
-        );
-    }
-
-    private static int[] computeDisplayedCosts(ItemStack stack, int bookshelves, int seed) {
+    private static boolean matchesCosts(PreparedObservation observation, int seed) {
         RandomSource random = RandomSource.create(seed);
-        int[] costs = new int[3];
 
         for (int slot = 0; slot < 3; slot++) {
-            int cost = EnchantmentHelper.getEnchantmentCost(random, slot, bookshelves, stack);
+            int cost = EnchantmentHelper.getEnchantmentCost(
+                    random,
+                    slot,
+                    observation.bookshelves,
+                    observation.stack
+            );
+
             if (cost < slot + 1) {
                 cost = 0;
             }
-            costs[slot] = cost;
-        }
 
-        return costs;
-    }
-
-    private static boolean matchesClues(
-            ItemStack stack,
-            int seed,
-            int[] observedCosts,
-            int[] observedClueIds,
-            int[] observedClueLevels,
-            Registry<Enchantment> enchantmentRegistry
-    ) {
-        for (int slot = 0; slot < 3; slot++) {
-            if (observedCosts[slot] <= 0) {
-                continue;
-            }
-
-            EnchantmentInstance shown = pickShownClue(
-                    stack,
-                    seed,
-                    slot,
-                    observedCosts[slot],
-                    enchantmentRegistry
-            );
-
-            if (shown == null) {
-                return false;
-            }
-
-            boolean idOk = true;
-            if (observedClueIds[slot] >= 0) {
-                var observedHolderOpt = enchantmentRegistry.getHolder(observedClueIds[slot]);
-                if (observedHolderOpt.isEmpty() || !observedHolderOpt.get().equals(shown.enchantment)) {
-                    idOk = false;
-                }
-            }
-
-            boolean levelOk = observedClueLevels[slot] <= 0 || shown.level == observedClueLevels[slot];
-
-            if (!idOk || !levelOk) {
+            if (cost != observation.costs[slot]) {
                 return false;
             }
         }
@@ -369,142 +248,57 @@ public final class EnchantSeedCracker {
         return true;
     }
 
-    private static EnchantmentInstance pickShownClue(
-            ItemStack stack,
+    private static boolean matchesAllClues(
             int seed,
-            int slot,
-            int cost,
-            Registry<Enchantment> enchantmentRegistry
+            List<PreparedObservation> observations,
+            Registry<Enchantment> enchantmentRegistry,
+            List<Holder<Enchantment>> holders
     ) {
-        List<Holder<Enchantment>> holders = StreamSupport
-                .stream(enchantmentRegistry.getTagOrEmpty(EnchantmentTags.IN_ENCHANTING_TABLE).spliterator(), false)
-                .map(holder -> (Holder<Enchantment>) holder)
-                .toList();
-
-        RandomSource enchantRandom = RandomSource.create((long) seed + slot);
-        List<EnchantmentInstance> list = new ArrayList<>(EnchantmentHelper.selectEnchantment(
-                enchantRandom,
-                stack,
-                cost,
-                holders.stream()
-        ));
-
-        if (list.isEmpty()) {
-            return null;
-        }
-
-        return list.get(enchantRandom.nextInt(list.size()));
-    }
-
-    private static ActualSeedCheckResult verifyActualSeed(
-            int actualSeed,
-            List<ObservationRecord> observations,
-            Registry<Enchantment> enchantmentRegistry
-    ) {
-        if (actualSeed == -1) {
-            return new ActualSeedCheckResult(false, false, -1, "unavailable");
-        }
-
-        if (observations.isEmpty()) {
-            return new ActualSeedCheckResult(true, true, -1, "");
-        }
-
-        boolean passesLatest = matchesObservation(
-                actualSeed,
-                observations.get(observations.size() - 1),
-                enchantmentRegistry
-        );
-
-        for (int i = 0; i < observations.size(); i++) {
-            ObservationRecord obs = observations.get(i);
-            boolean ok = matchesObservation(actualSeed, obs, enchantmentRegistry);
-
-            System.out.println("[actual-debug] obs#" + (i + 1)
-                    + " item=" + obs.getItem()
-                    + " ok=" + ok
-                    + " costs=" + Arrays.toString(obs.getCosts())
-                    + " clueIds=" + Arrays.toString(obs.getClueIds())
-                    + " clueLv=" + Arrays.toString(obs.getClueLevels()));
-
-            if (!ok) {
-                return new ActualSeedCheckResult(
-                        passesLatest,
-                        false,
-                        i,
-                        "obs#" + (i + 1)
-                );
+        for (PreparedObservation observation : observations) {
+            if (!matchesClues(seed, observation, enchantmentRegistry, holders)) {
+                return false;
             }
         }
-
-        return new ActualSeedCheckResult(true, true, -1, "");
+        return true;
     }
 
-
-    private static int getAuthoritativeEnchantSeed() {
-        Minecraft mc = Minecraft.getInstance();
-        if (mc.player == null) {
-            return -1;
-        }
-
-        if (mc.hasSingleplayerServer()) {
-            var server = mc.getSingleplayerServer();
-            if (server != null) {
-                var serverPlayer = server.getPlayerList().getPlayer(mc.player.getUUID());
-                if (serverPlayer != null) {
-                    return serverPlayer.getEnchantmentSeed();
-                }
-            }
-        }
-
-        return mc.player.getEnchantmentSeed();
-    }
-
-    private static void dumpActualPreview(
+    private static boolean matchesClues(
             int seed,
-            ObservationRecord obs,
-            Registry<Enchantment> enchantmentRegistry
+            PreparedObservation observation,
+            Registry<Enchantment> enchantmentRegistry,
+            List<Holder<Enchantment>> holders
     ) {
-        ItemStack stack = obs.createStack();
-        int[] actualCosts = computeDisplayedCosts(stack, obs.getBookshelves(), seed);
-
         for (int slot = 0; slot < 3; slot++) {
-            int observedCost = obs.getCosts()[slot];
-            int observedClueId = obs.getClueIds()[slot];
-            int observedClueLv = obs.getClueLevels()[slot];
-            int actualCost = actualCosts[slot];
+            if (observation.costs[slot] <= 0) {
+                continue;
+            }
 
-            String observedKey = "null";
-            if (observedClueId >= 0) {
-                var h = enchantmentRegistry.getHolder(observedClueId);
-                if (h.isPresent()) {
-                    observedKey = String.valueOf(enchantmentRegistry.getKey(h.get().value()));
-                } else {
-                    observedKey = "unknown_id_" + observedClueId;
+            RandomSource enchantRandom = RandomSource.create((long) seed + slot);
+            List<EnchantmentInstance> list = EnchantmentHelper.selectEnchantment(
+                    enchantRandom,
+                    observation.stack,
+                    observation.costs[slot],
+                    holders.stream()
+            );
+
+            if (list.isEmpty()) {
+                return false;
+            }
+
+            EnchantmentInstance first = list.get(0);
+
+            if (observation.clueIds[slot] >= 0) {
+                var observedHolderOpt = enchantmentRegistry.getHolder(observation.clueIds[slot]);
+                if (observedHolderOpt.isEmpty() || !observedHolderOpt.get().equals(first.enchantment)) {
+                    return false;
                 }
             }
 
-            String actualKey = "none";
-            int actualLv = 0;
-
-            if (actualCost > 0) {
-                EnchantmentInstance shown = pickShownClue(
-                        stack,
-                        seed,
-                        slot,
-                        actualCost,
-                        enchantmentRegistry
-                );
-                if (shown != null) {
-                    actualKey = String.valueOf(enchantmentRegistry.getKey(shown.enchantment.value()));
-                    actualLv = shown.level;
-                }
+            if (observation.clueLevels[slot] > 0 && first.level != observation.clueLevels[slot]) {
+                return false;
             }
-
-            System.out.println("[actual-debug] slot=" + slot
-                    + " observedCost=" + observedCost
-                    + " actualCost=" + actualCost
-                    + " observed=(" + observedKey + "," + observedClueLv + ")"
-                    + " actual=(" + actualKey + "," + actualLv + ")");
         }
+
+        return true;
     }
 }
