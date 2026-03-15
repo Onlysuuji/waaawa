@@ -33,6 +33,11 @@ public final class SeedCrackState {
     private static volatile int trackedEnchantSeed = UNKNOWN_ENCHANT_SEED;
     private static volatile boolean clueFilterInitialized = false;
 
+    private static volatile long stopwatchStartNanos = 0L;
+    private static volatile long stopwatchEndNanos = 0L;
+    private static volatile boolean stopwatchRunning = false;
+    private static volatile boolean stopwatchFinished = false;
+
     private static final List<ObservationRecord> appliedObservations = new ArrayList<>();
     private static final ArrayDeque<ObservationRecord> queuedObservations = new ArrayDeque<>();
     private static final Set<String> observationKeys = new HashSet<>();
@@ -65,12 +70,42 @@ public final class SeedCrackState {
         trackedEnchantSeed = UNKNOWN_ENCHANT_SEED;
         clueFilterInitialized = false;
 
+        resetStopwatch();
+
         appliedObservations.clear();
         queuedObservations.clear();
         observationKeys.clear();
         processedCostKeys.clear();
         costCandidates.clear();
         finalCandidates.clear();
+    }
+
+    private static void resetStopwatch() {
+        stopwatchStartNanos = 0L;
+        stopwatchEndNanos = 0L;
+        stopwatchRunning = false;
+        stopwatchFinished = false;
+    }
+
+    private static void ensureStopwatchStarted() {
+        if (stopwatchStartNanos == 0L) {
+            stopwatchStartNanos = System.nanoTime();
+            stopwatchEndNanos = 0L;
+            stopwatchRunning = true;
+            stopwatchFinished = false;
+        } else if (!stopwatchFinished && !stopwatchRunning) {
+            stopwatchRunning = true;
+            stopwatchEndNanos = 0L;
+        }
+    }
+
+    private static void stopStopwatchIfNeeded() {
+        if (stopwatchStartNanos == 0L || stopwatchFinished) {
+            return;
+        }
+        stopwatchEndNanos = System.nanoTime();
+        stopwatchRunning = false;
+        stopwatchFinished = true;
     }
 
     public static synchronized boolean updateEnchantSeedAndCheckReset(int currentEnchantSeed) {
@@ -112,6 +147,7 @@ public final class SeedCrackState {
         queuedObservations.addLast(observation);
         solved = false;
         solvedSeed = 0;
+        ensureStopwatchStarted();
         return true;
     }
 
@@ -128,6 +164,7 @@ public final class SeedCrackState {
         appliedObservations.add(next);
         solved = false;
         solvedSeed = 0;
+        ensureStopwatchStarted();
         return next;
     }
 
@@ -166,6 +203,10 @@ public final class SeedCrackState {
         return new ArrayList<>(costCandidates);
     }
 
+    public static synchronized List<ObservationRecord> getAppliedObservationsSnapshot() {
+        return new ArrayList<>(appliedObservations);
+    }
+
     public static synchronized boolean isClueFilterInitialized() {
         return clueFilterInitialized;
     }
@@ -175,10 +216,6 @@ public final class SeedCrackState {
             return;
         }
         clueFilterInitialized = true;
-    }
-
-    public static synchronized List<ObservationRecord> getAppliedObservationsSnapshot() {
-        return new ArrayList<>(appliedObservations);
     }
 
     public static synchronized int getObservationCount() {
@@ -209,6 +246,7 @@ public final class SeedCrackState {
         running = true;
         solved = false;
         solvedSeed = 0;
+        ensureStopwatchStarted();
 
         if (cursor < TOTAL_SEEDS) {
             phase = Phase.COST_SCAN;
@@ -335,6 +373,9 @@ public final class SeedCrackState {
         matched = finalCandidates.size();
         solved = finalCandidates.size() == 1;
         solvedSeed = solved ? finalCandidates.get(0) : 0;
+        if (solved) {
+            stopStopwatchIfNeeded();
+        }
     }
 
     public static synchronized void finishAllRuns(int expectedEpoch) {
@@ -349,6 +390,9 @@ public final class SeedCrackState {
         matched = finalCandidates.size();
         solved = finalCandidates.size() == 1;
         solvedSeed = solved ? finalCandidates.get(0) : 0;
+        if (solved) {
+            stopStopwatchIfNeeded();
+        }
     }
 
     public static boolean isRunning() {
@@ -385,5 +429,48 @@ public final class SeedCrackState {
 
     public static int getMatched() {
         return matched;
+    }
+
+    public static boolean isStopwatchRunning() {
+        return stopwatchRunning;
+    }
+
+    public static boolean isStopwatchFinished() {
+        return stopwatchFinished;
+    }
+
+    public static long getElapsedMillis() {
+        long start = stopwatchStartNanos;
+        if (start == 0L) {
+            return 0L;
+        }
+
+        long end;
+        if (stopwatchRunning) {
+            end = System.nanoTime();
+        } else if (stopwatchFinished && stopwatchEndNanos != 0L) {
+            end = stopwatchEndNanos;
+        } else {
+            end = start;
+        }
+
+        long delta = end - start;
+        if (delta < 0L) {
+            return 0L;
+        }
+        return delta / 1_000_000L;
+    }
+
+    public static String getElapsedFormatted() {
+        long millis = getElapsedMillis();
+        long hours = millis / 3_600_000L;
+        long minutes = (millis / 60_000L) % 60L;
+        long seconds = (millis / 1_000L) % 60L;
+        long ms = millis % 1_000L;
+
+        if (hours > 0L) {
+            return String.format("%d:%02d:%02d.%03d", hours, minutes, seconds, ms);
+        }
+        return String.format("%02d:%02d.%03d", minutes, seconds, ms);
     }
 }

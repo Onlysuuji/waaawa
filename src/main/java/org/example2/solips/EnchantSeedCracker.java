@@ -28,9 +28,14 @@ public final class EnchantSeedCracker {
     private static volatile Thread worker;
     private static volatile int workerEpoch = Integer.MIN_VALUE;
 
+    private static final int[] CLUE_SLOT_ORDER = new int[]{2, 1, 0};
+
     private static volatile Method reflectedGetEnchantmentList;
     private static volatile Field reflectedEnchantmentSeedField;
     private static volatile Field reflectedRandomField;
+
+    private static final ThreadLocal<RandomSource> COST_RANDOM =
+            ThreadLocal.withInitial(() -> RandomSource.create(0L));
 
     private EnchantSeedCracker() {
     }
@@ -38,6 +43,7 @@ public final class EnchantSeedCracker {
     private static final class PreparedObservation {
         final ItemStack stack;
         final int bookshelves;
+        final int enchantability;
         final int[] costs;
         final int[] clueIds;
         final int[] clueLevels;
@@ -45,6 +51,7 @@ public final class EnchantSeedCracker {
         PreparedObservation(ObservationRecord record) {
             this.stack = record.createStack();
             this.bookshelves = record.getBookshelves();
+            this.enchantability = this.stack.getEnchantmentValue();
             this.costs = record.getCosts();
             this.clueIds = record.getClueIds();
             this.clueLevels = record.getClueLevels();
@@ -76,6 +83,29 @@ public final class EnchantSeedCracker {
             this.actualClueLevels = actualClueLevels;
         }
     }
+
+    private static final class ScratchMenuHolder {
+        private EnchantmentMenu menu;
+
+        EnchantmentMenu get() {
+            Minecraft mc = Minecraft.getInstance();
+            if (mc.player == null) {
+                menu = null;
+                return null;
+            }
+            if (menu == null) {
+                menu = new EnchantmentMenu(0, mc.player.getInventory());
+            }
+            return menu;
+        }
+
+        void clear() {
+            menu = null;
+        }
+    }
+
+    private static final ThreadLocal<ScratchMenuHolder> SCRATCH_MENU =
+            ThreadLocal.withInitial(ScratchMenuHolder::new);
 
     public static void submitObservation(ObservationRecord observation) {
         if (observation == null) {
@@ -142,10 +172,12 @@ public final class EnchantSeedCracker {
                     return;
                 }
 
+
                 SeedCrackState.finishObservationRun(expectedEpoch);
                 logObservationSummary(activated, registryAccess, enchantmentRegistry, holders);
             }
         } finally {
+            SCRATCH_MENU.get().clear();
             synchronized (EnchantSeedCracker.class) {
                 if (Thread.currentThread() == worker) {
                     worker = null;
@@ -209,7 +241,7 @@ public final class EnchantSeedCracker {
 
             if ((cursor & (COST_FLUSH_INTERVAL - 1L)) == 0L) {
                 SeedCrackState.appendCostMatches(costBatch, cursor, expectedEpoch);
-                costBatch = new ArrayList<>(256);
+                costBatch.clear();
             }
         }
 
@@ -267,6 +299,7 @@ public final class EnchantSeedCracker {
 
         int processed = 0;
         List<Integer> finalBatch = new ArrayList<>(128);
+        ScratchMenuHolder scratchMenuHolder = SCRATCH_MENU.get();
 
         while (processed < source.size()) {
             if (SeedCrackState.getResetEpoch() != expectedEpoch) {
@@ -274,14 +307,14 @@ public final class EnchantSeedCracker {
             }
 
             int seed = source.get(processed);
-            if (matchesClues(seed, observation, registryAccess, enchantmentRegistry, holders)) {
+            if (matchesCluesFast(seed, observation, registryAccess, enchantmentRegistry, holders, scratchMenuHolder)) {
                 finalBatch.add(seed);
             }
             processed++;
 
             if (processed % CLUE_FLUSH_INTERVAL == 0) {
                 SeedCrackState.appendFinalMatches(finalBatch, processed, source.size(), expectedEpoch);
-                finalBatch = new ArrayList<>(128);
+                finalBatch.clear();
             }
         }
 
@@ -290,12 +323,48 @@ public final class EnchantSeedCracker {
     }
 
     private static boolean matchesCosts(PreparedObservation observation, int seed) {
-        return evaluateCosts(observation, seed).matches;
+        if (observation.enchantability <= 0) {
+            return observation.costs[0] == 0 && observation.costs[1] == 0 && observation.costs[2] == 0;
+        }
+
+        RandomSource random = COST_RANDOM.get();
+        random.setSeed(seed);
+
+        for (int slot = 0; slot < 3; slot++) {
+            int cost = EnchantmentHelper.getEnchantmentCost(
+                    random,
+                    slot,
+                    observation.bookshelves,
+                    observation.stack
+            );
+
+            if (cost < slot + 1) {
+                cost = 0;
+            }
+
+            if (cost != observation.costs[slot]) {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private static CostDebugResult evaluateCosts(PreparedObservation observation, int seed) {
-        RandomSource random = RandomSource.create(seed);
         int[] actualCosts = new int[3];
+
+        if (observation.enchantability <= 0) {
+            for (int slot = 0; slot < 3; slot++) {
+                actualCosts[slot] = 0;
+                if (observation.costs[slot] != 0) {
+                    return new CostDebugResult(false, slot, actualCosts);
+                }
+            }
+            return new CostDebugResult(true, -1, actualCosts);
+        }
+
+        RandomSource random = COST_RANDOM.get();
+        random.setSeed(seed);
 
         for (int slot = 0; slot < 3; slot++) {
             int cost = EnchantmentHelper.getEnchantmentCost(
@@ -318,6 +387,89 @@ public final class EnchantSeedCracker {
         return new CostDebugResult(true, -1, actualCosts);
     }
 
+    private static boolean matchesCluesFast(
+            int seed,
+            PreparedObservation observation,
+            RegistryAccess registryAccess,
+            Registry<Enchantment> enchantmentRegistry,
+            List<Holder<Enchantment>> holders,
+            ScratchMenuHolder scratchMenuHolder
+    ) {
+        EnchantmentMenu menu = scratchMenuHolder.get();
+        if (menu == null || !setMenuSeed(menu, seed)) {
+            return matchesCluesFallbackFast(seed, observation, enchantmentRegistry, holders);
+        }
+
+        for (int slot : CLUE_SLOT_ORDER) {
+            if (observation.costs[slot] <= 0) {
+                continue;
+            }
+
+            List<EnchantmentInstance> list =
+                    getMenuEnchantmentList(menu, registryAccess, observation.stack, slot, observation.costs[slot]);
+            if (list == null || list.isEmpty()) {
+                return false;
+            }
+
+            EnchantmentInstance displayed = pickDisplayedClue(menu, list);
+            if (displayed == null) {
+                return false;
+            }
+
+            int actualClueId = enchantmentRegistry.getId(displayed.enchantment.value());
+            if (observation.clueIds[slot] >= 0 && observation.clueIds[slot] != actualClueId) {
+                return false;
+            }
+
+            if (observation.clueLevels[slot] > 0 && observation.clueLevels[slot] != displayed.level) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static boolean matchesCluesFallbackFast(
+            int seed,
+            PreparedObservation observation,
+            Registry<Enchantment> enchantmentRegistry,
+            List<Holder<Enchantment>> holders
+    ) {
+        for (int slot : CLUE_SLOT_ORDER) {
+            if (observation.costs[slot] <= 0) {
+                continue;
+            }
+
+            RandomSource enchantRandom = RandomSource.create((long) seed + slot);
+            List<EnchantmentInstance> list = EnchantmentHelper.selectEnchantment(
+                    enchantRandom,
+                    observation.stack,
+                    observation.costs[slot],
+                    holders.stream()
+            );
+
+            if (list.isEmpty()) {
+                return false;
+            }
+
+            EnchantmentInstance displayed = pickDisplayedClue(enchantRandom, list);
+            if (displayed == null) {
+                return false;
+            }
+
+            int actualClueId = enchantmentRegistry.getId(displayed.enchantment.value());
+            if (observation.clueIds[slot] >= 0 && observation.clueIds[slot] != actualClueId) {
+                return false;
+            }
+
+            if (observation.clueLevels[slot] > 0 && observation.clueLevels[slot] != displayed.level) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
     private static boolean matchesClues(
             int seed,
             PreparedObservation observation,
@@ -338,12 +490,12 @@ public final class EnchantSeedCracker {
         int[] actualClueIds = new int[]{-1, -1, -1};
         int[] actualClueLevels = new int[]{0, 0, 0};
 
-        EnchantmentMenu menu = createScratchMenu();
+        EnchantmentMenu menu = getScratchMenu();
         if (menu == null || !setMenuSeed(menu, seed)) {
             return evaluateCluesFallback(seed, observation, enchantmentRegistry, holders);
         }
 
-        for (int slot = 0; slot < 3; slot++) {
+        for (int slot : CLUE_SLOT_ORDER) {
             if (observation.costs[slot] <= 0) {
                 continue;
             }
@@ -419,12 +571,8 @@ public final class EnchantSeedCracker {
         return new ClueDebugResult(true, -1, actualClueIds, actualClueLevels);
     }
 
-    private static EnchantmentMenu createScratchMenu() {
-        Minecraft mc = Minecraft.getInstance();
-        if (mc.player == null) {
-            return null;
-        }
-        return new EnchantmentMenu(0, mc.player.getInventory());
+    private static EnchantmentMenu getScratchMenu() {
+        return SCRATCH_MENU.get().get();
     }
 
     private static boolean setMenuSeed(EnchantmentMenu menu, int seed) {

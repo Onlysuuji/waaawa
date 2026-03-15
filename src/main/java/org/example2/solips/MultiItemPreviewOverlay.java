@@ -36,6 +36,10 @@ public class MultiItemPreviewOverlay {
         graphics.drawString(font, "running=" + SeedCrackState.isRunning(), left, y, 0xFFFFFF, false);
         y += font.lineHeight + 2;
 
+        int stopwatchColor = SeedCrackState.isSolved() ? 0x55FF55 : (SeedCrackState.isStopwatchRunning() ? 0xFFFF55 : 0xCCCCCC);
+        graphics.drawString(font, "elapsed=" + SeedCrackState.getElapsedFormatted(), left, y, stopwatchColor, false);
+        y += font.lineHeight + 2;
+
         graphics.drawString(font, "checked=" + SeedCrackState.getChecked(), left, y, 0xFFFFFF, false);
         y += font.lineHeight + 2;
 
@@ -59,9 +63,13 @@ public class MultiItemPreviewOverlay {
 
         ObservationRecord snapshot = ObservedEnchantState.snapshot();
         if (snapshot != null) {
+            graphics.drawString(font, "bookshelves=" + snapshot.getBookshelves() + " (auto)", left, y, 0xAAAAFF, false);
+            y += font.lineHeight + 2;
             graphics.drawString(font, "latest=" + snapshot.getKey(), left, y, 0xAAAAFF, false);
             y += font.lineHeight + 2;
         } else {
+            graphics.drawString(font, "bookshelves=(none)", left, y, 0x888888, false);
+            y += font.lineHeight + 2;
             graphics.drawString(font, "latest=(none)", left, y, 0x888888, false);
             y += font.lineHeight + 2;
         }
