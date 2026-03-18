@@ -5,7 +5,8 @@ import net.minecraft.world.item.ItemStack;
 
 import java.util.Arrays;
 
-public final class ObservationRecord {
+public final class
+ObservationRecord {
     private final Item item;
     private final int bookshelves;
     private final int[] costs;

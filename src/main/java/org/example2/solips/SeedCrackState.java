@@ -2,6 +2,7 @@ package org.example2.solips;
 
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
@@ -20,19 +21,15 @@ public final class SeedCrackState {
     private static volatile boolean running = false;
     private static volatile boolean solved = false;
     private static volatile int solvedSeed = 0;
-
     private static volatile Phase phase = Phase.IDLE;
     private static volatile long phaseChecked = 0L;
     private static volatile long phaseTotal = TOTAL_SEEDS;
-
     private static volatile long cursor = 0L;
     private static volatile int costMatched = 0;
     private static volatile int matched = 0;
-
     private static volatile int resetEpoch = 0;
     private static volatile int trackedEnchantSeed = UNKNOWN_ENCHANT_SEED;
     private static volatile boolean clueFilterInitialized = false;
-
     private static volatile long stopwatchStartNanos = 0L;
     private static volatile long stopwatchEndNanos = 0L;
     private static volatile boolean stopwatchRunning = false;
@@ -44,8 +41,10 @@ public final class SeedCrackState {
     private static final Set<String> processedCostKeys = new HashSet<>();
     private static final Set<String> processedClueObservationKeys = new HashSet<>();
 
-    private static final List<Integer> costCandidates = new ArrayList<>();
-    private static final List<Integer> finalCandidates = new ArrayList<>();
+    private static int[] costCandidates = new int[0];
+    private static int costCandidateCount = 0;
+    private static int[] finalCandidates = new int[0];
+    private static int finalCandidateCount = 0;
 
     private SeedCrackState() {
     }
@@ -59,18 +58,14 @@ public final class SeedCrackState {
         running = false;
         solved = false;
         solvedSeed = 0;
-
         phase = Phase.IDLE;
         phaseChecked = 0L;
         phaseTotal = TOTAL_SEEDS;
-
         cursor = 0L;
         costMatched = 0;
         matched = 0;
-
         trackedEnchantSeed = UNKNOWN_ENCHANT_SEED;
         clueFilterInitialized = false;
-
         resetStopwatch();
 
         appliedObservations.clear();
@@ -78,8 +73,11 @@ public final class SeedCrackState {
         observationKeys.clear();
         processedCostKeys.clear();
         processedClueObservationKeys.clear();
-        costCandidates.clear();
-        finalCandidates.clear();
+
+        costCandidates = new int[0];
+        costCandidateCount = 0;
+        finalCandidates = new int[0];
+        finalCandidateCount = 0;
     }
 
     private static void resetStopwatch() {
@@ -114,12 +112,10 @@ public final class SeedCrackState {
         if (currentEnchantSeed == UNKNOWN_ENCHANT_SEED) {
             return false;
         }
-
         if (trackedEnchantSeed == UNKNOWN_ENCHANT_SEED) {
             trackedEnchantSeed = currentEnchantSeed;
             return false;
         }
-
         if (trackedEnchantSeed == currentEnchantSeed) {
             return false;
         }
@@ -214,24 +210,37 @@ public final class SeedCrackState {
         if (resetEpoch != expectedEpoch) {
             return List.of();
         }
-        return new ArrayList<>(costCandidates);
+        return toBoxedList(costCandidates, costCandidateCount);
+    }
+
+    public static synchronized int[] getCostCandidatesArraySnapshot(int expectedEpoch) {
+        if (resetEpoch != expectedEpoch) {
+            return new int[0];
+        }
+        return Arrays.copyOf(costCandidates, costCandidateCount);
     }
 
     public static synchronized List<Integer> getFinalCandidatesSnapshot(int expectedEpoch) {
         if (resetEpoch != expectedEpoch) {
             return List.of();
         }
-        return new ArrayList<>(finalCandidates);
+        return toBoxedList(finalCandidates, finalCandidateCount);
+    }
+
+    public static synchronized int[] getFinalCandidatesArraySnapshot(int expectedEpoch) {
+        if (resetEpoch != expectedEpoch) {
+            return new int[0];
+        }
+        return Arrays.copyOf(finalCandidates, finalCandidateCount);
     }
 
     public static synchronized List<Integer> getClueSourceSnapshot(int expectedEpoch) {
         if (resetEpoch != expectedEpoch) {
             return List.of();
         }
-        if (clueFilterInitialized) {
-            return new ArrayList<>(finalCandidates);
-        }
-        return new ArrayList<>(costCandidates);
+        return clueFilterInitialized
+                ? toBoxedList(finalCandidates, finalCandidateCount)
+                : toBoxedList(costCandidates, costCandidateCount);
     }
 
     public static synchronized List<ObservationRecord> getAppliedObservationsSnapshot() {
@@ -286,43 +295,38 @@ public final class SeedCrackState {
         } else {
             phase = Phase.CLUE_FILTER;
             phaseChecked = 0L;
-            phaseTotal = clueFilterInitialized ? finalCandidates.size() : costCandidates.size();
+            phaseTotal = clueFilterInitialized ? finalCandidateCount : costCandidateCount;
         }
 
-        costMatched = costCandidates.size();
-        matched = finalCandidates.size();
+        costMatched = costCandidateCount;
+        matched = finalCandidateCount;
     }
 
     public static synchronized void appendCostMatches(List<Integer> newMatches, long newCursor, int expectedEpoch) {
         if (resetEpoch != expectedEpoch) {
             return;
         }
+        int[] asArray = toIntArray(newMatches);
+        appendCostMatches(asArray, asArray.length, newCursor, expectedEpoch);
+    }
 
-        if (!newMatches.isEmpty()) {
-            costCandidates.addAll(newMatches);
+    public static synchronized void appendCostMatches(int[] newMatches, int count, long newCursor, int expectedEpoch) {
+        if (resetEpoch != expectedEpoch) {
+            return;
+        }
+
+        if (count > 0) {
+            ensureCostCapacity(costCandidateCount + count);
+            System.arraycopy(newMatches, 0, costCandidates, costCandidateCount, count);
+            costCandidateCount += count;
         }
 
         cursor = newCursor;
         phase = Phase.COST_SCAN;
         phaseChecked = newCursor;
         phaseTotal = TOTAL_SEEDS;
-        costMatched = costCandidates.size();
-        matched = finalCandidates.size();
-        solved = false;
-        solvedSeed = 0;
-    }
-
-    public static synchronized void updateCostScanProgress(long newCursor, int provisionalCostMatched, int expectedEpoch) {
-        if (resetEpoch != expectedEpoch) {
-            return;
-        }
-
-        cursor = Math.max(cursor, Math.min(newCursor, TOTAL_SEEDS));
-        phase = Phase.COST_SCAN;
-        phaseChecked = cursor;
-        phaseTotal = TOTAL_SEEDS;
-        costMatched = Math.max(costCandidates.size(), provisionalCostMatched);
-        matched = finalCandidates.size();
+        costMatched = costCandidateCount;
+        matched = finalCandidateCount;
         solved = false;
         solvedSeed = 0;
     }
@@ -331,10 +335,18 @@ public final class SeedCrackState {
         if (resetEpoch != expectedEpoch) {
             return;
         }
+        int[] asArray = toIntArray(newCandidates);
+        replaceCostCandidates(asArray, asArray.length, expectedEpoch);
+    }
 
-        costCandidates.clear();
-        costCandidates.addAll(newCandidates);
-        costMatched = costCandidates.size();
+    public static synchronized void replaceCostCandidates(int[] newCandidates, int count, int expectedEpoch) {
+        if (resetEpoch != expectedEpoch) {
+            return;
+        }
+
+        costCandidates = Arrays.copyOf(newCandidates, count);
+        costCandidateCount = count;
+        costMatched = costCandidateCount;
         solved = false;
         solvedSeed = 0;
     }
@@ -343,10 +355,18 @@ public final class SeedCrackState {
         if (resetEpoch != expectedEpoch) {
             return;
         }
+        int[] asArray = toIntArray(newCandidates);
+        replaceFinalCandidates(asArray, asArray.length, expectedEpoch);
+    }
 
-        finalCandidates.clear();
-        finalCandidates.addAll(newCandidates);
-        matched = finalCandidates.size();
+    public static synchronized void replaceFinalCandidates(int[] newCandidates, int count, int expectedEpoch) {
+        if (resetEpoch != expectedEpoch) {
+            return;
+        }
+
+        finalCandidates = Arrays.copyOf(newCandidates, count);
+        finalCandidateCount = count;
+        matched = finalCandidateCount;
         solved = false;
         solvedSeed = 0;
     }
@@ -359,9 +379,9 @@ public final class SeedCrackState {
         cursor = TOTAL_SEEDS;
         phase = Phase.CLUE_FILTER;
         phaseChecked = 0L;
-        phaseTotal = clueFilterInitialized ? finalCandidates.size() : costCandidates.size();
-        costMatched = costCandidates.size();
-        matched = finalCandidates.size();
+        phaseTotal = clueFilterInitialized ? finalCandidateCount : costCandidateCount;
+        costMatched = costCandidateCount;
+        matched = finalCandidateCount;
         solved = false;
         solvedSeed = 0;
     }
@@ -371,9 +391,9 @@ public final class SeedCrackState {
             return;
         }
 
-        int clueSourceSize = clueFilterInitialized ? finalCandidates.size() : costCandidates.size();
-
-        finalCandidates.clear();
+        int clueSourceSize = clueFilterInitialized ? finalCandidateCount : costCandidateCount;
+        finalCandidates = new int[0];
+        finalCandidateCount = 0;
         matched = 0;
 
         if (cursor >= TOTAL_SEEDS) {
@@ -386,24 +406,29 @@ public final class SeedCrackState {
         solvedSeed = 0;
     }
 
-    public static synchronized void appendFinalMatches(
-            List<Integer> newMatches,
-            int processed,
-            int total,
-            int expectedEpoch
-    ) {
+    public static synchronized void appendFinalMatches(List<Integer> newMatches, int processed, int total, int expectedEpoch) {
+        if (resetEpoch != expectedEpoch) {
+            return;
+        }
+        int[] asArray = toIntArray(newMatches);
+        appendFinalMatches(asArray, asArray.length, processed, total, expectedEpoch);
+    }
+
+    public static synchronized void appendFinalMatches(int[] newMatches, int count, int processed, int total, int expectedEpoch) {
         if (resetEpoch != expectedEpoch) {
             return;
         }
 
-        if (!newMatches.isEmpty()) {
-            finalCandidates.addAll(newMatches);
+        if (count > 0) {
+            ensureFinalCapacity(finalCandidateCount + count);
+            System.arraycopy(newMatches, 0, finalCandidates, finalCandidateCount, count);
+            finalCandidateCount += count;
         }
 
         phase = Phase.CLUE_FILTER;
         phaseChecked = processed;
         phaseTotal = total;
-        matched = finalCandidates.size();
+        matched = finalCandidateCount;
         solved = false;
         solvedSeed = 0;
     }
@@ -415,10 +440,10 @@ public final class SeedCrackState {
 
         phase = Phase.DONE;
         phaseChecked = phaseTotal;
-        costMatched = costCandidates.size();
-        matched = finalCandidates.size();
-        solved = finalCandidates.size() == 1;
-        solvedSeed = solved ? finalCandidates.get(0) : 0;
+        costMatched = costCandidateCount;
+        matched = finalCandidateCount;
+        solved = finalCandidateCount == 1;
+        solvedSeed = solved ? finalCandidates[0] : 0;
         if (solved) {
             stopStopwatchIfNeeded();
         }
@@ -432,10 +457,10 @@ public final class SeedCrackState {
         running = false;
         phase = appliedObservations.isEmpty() ? Phase.IDLE : Phase.DONE;
         phaseChecked = phase == Phase.IDLE ? 0L : phaseTotal;
-        costMatched = costCandidates.size();
-        matched = finalCandidates.size();
-        solved = finalCandidates.size() == 1;
-        solvedSeed = solved ? finalCandidates.get(0) : 0;
+        costMatched = costCandidateCount;
+        matched = finalCandidateCount;
+        solved = finalCandidateCount == 1;
+        solvedSeed = solved ? finalCandidates[0] : 0;
         if (solved) {
             stopStopwatchIfNeeded();
         }
@@ -518,5 +543,47 @@ public final class SeedCrackState {
             return String.format("%d:%02d:%02d.%03d", hours, minutes, seconds, ms);
         }
         return String.format("%02d:%02d.%03d", minutes, seconds, ms);
+    }
+
+    private static void ensureCostCapacity(int requiredCapacity) {
+        if (requiredCapacity <= costCandidates.length) {
+            return;
+        }
+        int newCapacity = Math.max(16, costCandidates.length);
+        while (newCapacity < requiredCapacity) {
+            newCapacity = Math.max(newCapacity << 1, requiredCapacity);
+        }
+        costCandidates = Arrays.copyOf(costCandidates, newCapacity);
+    }
+
+    private static void ensureFinalCapacity(int requiredCapacity) {
+        if (requiredCapacity <= finalCandidates.length) {
+            return;
+        }
+        int newCapacity = Math.max(16, finalCandidates.length);
+        while (newCapacity < requiredCapacity) {
+            newCapacity = Math.max(newCapacity << 1, requiredCapacity);
+        }
+        finalCandidates = Arrays.copyOf(finalCandidates, newCapacity);
+    }
+
+    private static List<Integer> toBoxedList(int[] source, int count) {
+        List<Integer> snapshot = new ArrayList<>(count);
+        for (int i = 0; i < count; i++) {
+            snapshot.add(source[i]);
+        }
+        return snapshot;
+    }
+
+    private static int[] toIntArray(List<Integer> source) {
+        if (source == null || source.isEmpty()) {
+            return new int[0];
+        }
+
+        int[] array = new int[source.size()];
+        for (int i = 0; i < source.size(); i++) {
+            array[i] = source.get(i);
+        }
+        return array;
     }
 }

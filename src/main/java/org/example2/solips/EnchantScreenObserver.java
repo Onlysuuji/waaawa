@@ -39,6 +39,13 @@ public class EnchantScreenObserver {
     public static void onClientTick(ClientTickEvent.Post event) {
         Minecraft mc = Minecraft.getInstance();
 
+        if (!ClientFeatureToggle.isEnabled()) {
+            if (wasInEnchantScreen || pendingKey != null || ObservedEnchantState.snapshot() != null) {
+                clearClientObservationState();
+            }
+            return;
+        }
+
         Integer currentEnchantSeed = getAuthoritativeEnchantSeed(mc);
         if (currentEnchantSeed != null) {
             boolean reset = SeedCrackState.updateEnchantSeedAndCheckReset(currentEnchantSeed);
@@ -122,7 +129,6 @@ public class EnchantScreenObserver {
         if (mc.player == null) {
             return null;
         }
-
         if (mc.hasSingleplayerServer()) {
             var server = mc.getSingleplayerServer();
             if (server == null) {
@@ -134,7 +140,6 @@ public class EnchantScreenObserver {
             }
             return serverPlayer.getEnchantmentSeed();
         }
-
         return mc.player.getEnchantmentSeed();
     }
 
@@ -206,7 +211,8 @@ public class EnchantScreenObserver {
 
         for (BlockPos pos : BlockPos.betweenClosed(
                 playerPos.offset(-8, -4, -8),
-                playerPos.offset(8, 4, 8))) {
+                playerPos.offset(8, 4, 8)
+        )) {
             if (!mc.level.getBlockState(pos).is(Blocks.ENCHANTING_TABLE)) {
                 continue;
             }
@@ -239,8 +245,7 @@ public class EnchantScreenObserver {
                     continue;
                 }
 
-                if (!isGapOpen(level, tablePos.offset(dx, 0, dz))
-                        || !isGapOpen(level, tablePos.offset(dx, 1, dz))) {
+                if (!isGapOpen(level, tablePos.offset(dx, 0, dz)) || !isGapOpen(level, tablePos.offset(dx, 1, dz))) {
                     continue;
                 }
 

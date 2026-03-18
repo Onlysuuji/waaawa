@@ -13,7 +13,9 @@ import org.lwjgl.glfw.GLFW;
 
 public final class ManualResetKeyHandler {
     private static KeyMapping resetAllMapping;
-    private static boolean wasDown = false;
+    private static KeyMapping toggleEnabledMapping;
+    private static boolean wasResetDown = false;
+    private static boolean wasToggleDown = false;
 
     private ManualResetKeyHandler() {
     }
@@ -25,6 +27,24 @@ public final class ManualResetKeyHandler {
 
         if (mc.player != null) {
             mc.player.displayClientMessage(Component.literal("[solips] reset all"), true);
+        }
+    }
+
+    private static void triggerToggle(Minecraft mc) {
+        boolean enabled = ClientFeatureToggle.toggle();
+        if (!enabled) {
+            SeedCrackState.resetAll();
+            EnchantScreenObserver.clearClientObservationState();
+            System.out.println("[toggle] disabled by N key");
+        } else {
+            System.out.println("[toggle] enabled by N key");
+        }
+
+        if (mc.player != null) {
+            mc.player.displayClientMessage(
+                    Component.literal(enabled ? "[solips] enabled" : "[solips] disabled"),
+                    true
+            );
         }
     }
 
@@ -44,6 +64,16 @@ public final class ManualResetKeyHandler {
                 );
             }
             event.register(resetAllMapping);
+
+            if (toggleEnabledMapping == null) {
+                toggleEnabledMapping = new KeyMapping(
+                        "key.solips.toggle_enabled",
+                        InputConstants.Type.KEYSYM,
+                        GLFW.GLFW_KEY_N,
+                        "key.categories.solips"
+                );
+            }
+            event.register(toggleEnabledMapping);
         }
     }
 
@@ -55,16 +85,27 @@ public final class ManualResetKeyHandler {
         @SubscribeEvent
         public static void onClientTick(ClientTickEvent.Post event) {
             Minecraft mc = Minecraft.getInstance();
-            if (mc.player == null || resetAllMapping == null) {
-                wasDown = false;
+
+            if (toggleEnabledMapping == null) {
+                wasToggleDown = false;
+            } else {
+                boolean toggleDown = toggleEnabledMapping.isDown();
+                if (toggleDown && !wasToggleDown) {
+                    triggerToggle(mc);
+                }
+                wasToggleDown = toggleDown;
+            }
+
+            if (resetAllMapping == null || mc.player == null) {
+                wasResetDown = false;
                 return;
             }
 
-            boolean isDown = resetAllMapping.isDown();
-            if (isDown && !wasDown) {
+            boolean resetDown = resetAllMapping.isDown();
+            if (resetDown && !wasResetDown) {
                 triggerReset(mc);
             }
-            wasDown = isDown;
+            wasResetDown = resetDown;
         }
     }
 }
