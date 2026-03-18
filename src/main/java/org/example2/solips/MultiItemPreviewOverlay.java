@@ -24,6 +24,9 @@ public class MultiItemPreviewOverlay {
         int left = 5;
         int y = 5;
 
+        graphics.drawString(font, "resetKey=M", left, y, 0xAAAAAA, false);
+        y += font.lineHeight + 2;
+
         graphics.drawString(font, "observations=" + SeedCrackState.getObservationCount(), left, y, 0xFFFFFF, false);
         y += font.lineHeight + 2;
 

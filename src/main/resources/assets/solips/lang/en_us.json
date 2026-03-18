@@ -1,5 +1,7 @@
 {
   "itemGroup.solips": "Example Mod Tab",
   "block.solips.example_block": "Example Block",
-  "item.solips.example_item": "Example Item"
+  "item.solips.example_item": "Example Item",
+  "key.categories.solips": "Solips",
+  "key.solips.reset_all": "Reset all seed crack state"
 }

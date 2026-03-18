@@ -145,6 +145,8 @@ public final class EnchantSeedCracker {
     }
 
     private static void runQueuedCrack(RegistryAccess registryAccess, int expectedEpoch) {
+        boolean restartWorker = false;
+
         try {
             Registry<Enchantment> enchantmentRegistry =
                     registryAccess.registryOrThrow(Registries.ENCHANTMENT);
@@ -159,48 +161,70 @@ public final class EnchantSeedCracker {
                     return;
                 }
 
-                ObservationRecord activated = SeedCrackState.activateNextObservation(expectedEpoch);
-                if (activated == null) {
+                List<ObservationRecord> activated = drainQueuedObservations(expectedEpoch);
+                if (activated.isEmpty()) {
                     SeedCrackState.finishAllRuns(expectedEpoch);
                     return;
                 }
 
                 SeedCrackState.beginRun(expectedEpoch);
-                runSingleObservationPass(activated, expectedEpoch, registryAccess, enchantmentRegistry, holders);
 
+                while (true) {
+                    processAllPendingCostConstraints(expectedEpoch);
+                    if (SeedCrackState.getResetEpoch() != expectedEpoch) {
+                        return;
+                    }
+
+                    List<ObservationRecord> moreActivated = drainQueuedObservations(expectedEpoch);
+                    if (moreActivated.isEmpty()) {
+                        break;
+                    }
+                    activated.addAll(moreActivated);
+                }
+
+                applyPendingClueConstraints(expectedEpoch, registryAccess, enchantmentRegistry, holders);
                 if (SeedCrackState.getResetEpoch() != expectedEpoch) {
                     return;
                 }
 
-
                 SeedCrackState.finishObservationRun(expectedEpoch);
-                logObservationSummary(activated, registryAccess, enchantmentRegistry, holders);
+                logObservationSummary(activated.get(activated.size() - 1), registryAccess, enchantmentRegistry, holders);
             }
         } finally {
             SCRATCH_MENU.get().clear();
+            restartWorker = SeedCrackState.hasQueuedObservations(expectedEpoch);
             synchronized (EnchantSeedCracker.class) {
                 if (Thread.currentThread() == worker) {
                     worker = null;
                 }
             }
+            if (restartWorker) {
+                ensureWorkerRunning();
+            }
         }
     }
 
-    private static void runSingleObservationPass(
-            ObservationRecord record,
-            int expectedEpoch,
-            RegistryAccess registryAccess,
-            Registry<Enchantment> enchantmentRegistry,
-            List<Holder<Enchantment>> holders
-    ) {
-        PreparedObservation observation = new PreparedObservation(record);
-        processCostConstraint(record.getCostKey(), observation, expectedEpoch);
-
-        if (SeedCrackState.getResetEpoch() != expectedEpoch) {
-            return;
+    private static List<ObservationRecord> drainQueuedObservations(int expectedEpoch) {
+        List<ObservationRecord> activated = new ArrayList<>();
+        while (true) {
+            ObservationRecord next = SeedCrackState.activateNextObservation(expectedEpoch);
+            if (next == null) {
+                return activated;
+            }
+            activated.add(next);
         }
+    }
 
-        clueFilter(observation, registryAccess, enchantmentRegistry, holders, expectedEpoch);
+    private static void processAllPendingCostConstraints(int expectedEpoch) {
+        for (ObservationRecord record : SeedCrackState.getAppliedObservationsSnapshot()) {
+            if (SeedCrackState.getResetEpoch() != expectedEpoch) {
+                return;
+            }
+            if (SeedCrackState.hasProcessedCostKey(record.getCostKey())) {
+                continue;
+            }
+            processCostConstraint(record.getCostKey(), new PreparedObservation(record), expectedEpoch);
+        }
     }
 
     private static void processCostConstraint(String costKey, PreparedObservation observation, int expectedEpoch) {
@@ -287,27 +311,79 @@ public final class EnchantSeedCracker {
         SeedCrackState.replaceFinalCandidates(next, expectedEpoch);
     }
 
-    private static void clueFilter(
+    private static void applyPendingClueConstraints(
+            int expectedEpoch,
+            RegistryAccess registryAccess,
+            Registry<Enchantment> enchantmentRegistry,
+            List<Holder<Enchantment>> holders
+    ) {
+        List<Integer> source;
+        List<ObservationRecord> clueTargets;
+
+        if (SeedCrackState.isClueFilterInitialized()) {
+            source = SeedCrackState.getFinalCandidatesSnapshot(expectedEpoch);
+            clueTargets = SeedCrackState.getPendingClueObservationsSnapshot(expectedEpoch);
+        } else {
+            source = SeedCrackState.getCostCandidatesSnapshot(expectedEpoch);
+            clueTargets = SeedCrackState.getAppliedObservationsSnapshot();
+        }
+
+        System.out.println("[clue-pass] initialized=" + SeedCrackState.isClueFilterInitialized()
+                + " sourceSize=" + source.size()
+                + " pending=" + clueTargets.size()
+                + " costMatched=" + SeedCrackState.getCostMatched()
+                + " matched=" + SeedCrackState.getMatched());
+
+        for (ObservationRecord record : clueTargets) {
+            if (SeedCrackState.getResetEpoch() != expectedEpoch) {
+                return;
+            }
+            if (SeedCrackState.hasProcessedClueObservationKey(record.getKey())) {
+                continue;
+            }
+
+            source = clueFilterFromSource(
+                    source,
+                    new PreparedObservation(record),
+                    registryAccess,
+                    enchantmentRegistry,
+                    holders,
+                    expectedEpoch
+            );
+
+            if (SeedCrackState.getResetEpoch() != expectedEpoch) {
+                return;
+            }
+
+            SeedCrackState.markObservationClueProcessed(record.getKey(), expectedEpoch);
+        }
+
+        SeedCrackState.markClueFilterInitialized(expectedEpoch);
+    }
+
+    private static List<Integer> clueFilterFromSource(
+            List<Integer> source,
             PreparedObservation observation,
             RegistryAccess registryAccess,
             Registry<Enchantment> enchantmentRegistry,
             List<Holder<Enchantment>> holders,
             int expectedEpoch
     ) {
-        List<Integer> source = SeedCrackState.getClueSourceSnapshot(expectedEpoch);
         SeedCrackState.clearFinalCandidates(expectedEpoch);
 
         int processed = 0;
+        List<Integer> next = new ArrayList<>(Math.min(source.size(), 1024));
         List<Integer> finalBatch = new ArrayList<>(128);
         ScratchMenuHolder scratchMenuHolder = SCRATCH_MENU.get();
 
         while (processed < source.size()) {
             if (SeedCrackState.getResetEpoch() != expectedEpoch) {
-                return;
+                return List.of();
             }
 
             int seed = source.get(processed);
             if (matchesCluesFast(seed, observation, registryAccess, enchantmentRegistry, holders, scratchMenuHolder)) {
+                next.add(seed);
                 finalBatch.add(seed);
             }
             processed++;
@@ -319,7 +395,7 @@ public final class EnchantSeedCracker {
         }
 
         SeedCrackState.appendFinalMatches(finalBatch, processed, source.size(), expectedEpoch);
-        SeedCrackState.markClueFilterInitialized(expectedEpoch);
+        return next;
     }
 
     private static boolean matchesCosts(PreparedObservation observation, int seed) {

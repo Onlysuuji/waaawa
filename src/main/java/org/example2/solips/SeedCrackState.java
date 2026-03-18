@@ -42,6 +42,7 @@ public final class SeedCrackState {
     private static final ArrayDeque<ObservationRecord> queuedObservations = new ArrayDeque<>();
     private static final Set<String> observationKeys = new HashSet<>();
     private static final Set<String> processedCostKeys = new HashSet<>();
+    private static final Set<String> processedClueObservationKeys = new HashSet<>();
 
     private static final List<Integer> costCandidates = new ArrayList<>();
     private static final List<Integer> finalCandidates = new ArrayList<>();
@@ -76,6 +77,7 @@ public final class SeedCrackState {
         queuedObservations.clear();
         observationKeys.clear();
         processedCostKeys.clear();
+        processedClueObservationKeys.clear();
         costCandidates.clear();
         finalCandidates.clear();
     }
@@ -170,6 +172,35 @@ public final class SeedCrackState {
 
     public static synchronized boolean hasProcessedCostKey(String costKey) {
         return processedCostKeys.contains(costKey);
+    }
+
+    public static synchronized boolean hasProcessedClueObservationKey(String observationKey) {
+        return processedClueObservationKeys.contains(observationKey);
+    }
+
+    public static synchronized void markObservationClueProcessed(String observationKey, int expectedEpoch) {
+        if (resetEpoch != expectedEpoch) {
+            return;
+        }
+        processedClueObservationKeys.add(observationKey);
+    }
+
+    public static synchronized List<ObservationRecord> getPendingClueObservationsSnapshot(int expectedEpoch) {
+        if (resetEpoch != expectedEpoch) {
+            return List.of();
+        }
+
+        List<ObservationRecord> pending = new ArrayList<>();
+        for (ObservationRecord record : appliedObservations) {
+            if (!processedClueObservationKeys.contains(record.getKey())) {
+                pending.add(record);
+            }
+        }
+        return pending;
+    }
+
+    public static synchronized boolean hasQueuedObservations(int expectedEpoch) {
+        return resetEpoch == expectedEpoch && !queuedObservations.isEmpty();
     }
 
     public static synchronized void markCostKeyProcessed(String costKey, int expectedEpoch) {

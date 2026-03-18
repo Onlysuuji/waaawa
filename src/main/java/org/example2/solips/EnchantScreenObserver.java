@@ -29,6 +29,12 @@ public class EnchantScreenObserver {
         pendingTicks = 0;
     }
 
+    public static void clearClientObservationState() {
+        ObservedEnchantState.clear();
+        resetPending();
+        wasInEnchantScreen = false;
+    }
+
     @SubscribeEvent
     public static void onClientTick(ClientTickEvent.Post event) {
         Minecraft mc = Minecraft.getInstance();
@@ -38,36 +44,30 @@ public class EnchantScreenObserver {
             boolean reset = SeedCrackState.updateEnchantSeedAndCheckReset(currentEnchantSeed);
             if (reset) {
                 System.out.println("[seed-reset] newEnchantSeed=" + Integer.toUnsignedString(currentEnchantSeed));
-                ObservedEnchantState.clear();
-                resetPending();
+                clearClientObservationState();
                 wasInEnchantScreen = mc.screen instanceof EnchantmentScreen;
                 return;
             }
         }
 
         boolean inEnchantScreen = mc.screen instanceof EnchantmentScreen;
-
         if (!inEnchantScreen) {
             if (wasInEnchantScreen) {
-                ObservedEnchantState.clear();
-                resetPending();
+                clearClientObservationState();
             }
             wasInEnchantScreen = false;
             return;
         }
-
         wasInEnchantScreen = true;
 
         if (mc.player == null || !(mc.player.containerMenu instanceof EnchantmentMenu menu)) {
-            ObservedEnchantState.clear();
-            resetPending();
+            clearClientObservationState();
             return;
         }
 
         ItemStack stack = menu.getSlot(0).getItem();
         if (stack.isEmpty()) {
-            ObservedEnchantState.clear();
-            resetPending();
+            clearClientObservationState();
             return;
         }
 
@@ -75,24 +75,26 @@ public class EnchantScreenObserver {
         int[] clueIds = new int[3];
         int[] clueLevels = new int[3];
         boolean usable = false;
-
         for (int i = 0; i < 3; i++) {
             costs[i] = menu.costs[i];
             clueIds[i] = menu.enchantClue[i];
             clueLevels[i] = menu.levelClue[i];
-
             if (costs[i] > 0 && clueIds[i] >= 0 && clueLevels[i] > 0) {
                 usable = true;
             }
         }
-
         if (!usable) {
             return;
         }
 
-        int bookshelves = resolveBookshelves(mc, menu);
-        String key = ObservationRecord.buildKey(stack.getItem(), bookshelves, costs, clueIds, clueLevels);
+        Integer resolvedBookshelves = resolveBookshelves(mc, menu);
+        if (resolvedBookshelves == null) {
+            clearClientObservationState();
+            return;
+        }
 
+        int bookshelves = resolvedBookshelves;
+        String key = ObservationRecord.buildKey(stack.getItem(), bookshelves, costs, clueIds, clueLevels);
         if (!key.equals(pendingKey)) {
             pendingKey = key;
             pendingTicks = 1;
@@ -105,10 +107,7 @@ public class EnchantScreenObserver {
         }
 
         ObservedEnchantState.set(stack.getItem(), bookshelves, costs, clueIds, clueLevels);
-
-        ObservationRecord observation =
-                new ObservationRecord(stack.getItem(), bookshelves, costs, clueIds, clueLevels);
-
+        ObservationRecord observation = new ObservationRecord(stack.getItem(), bookshelves, costs, clueIds, clueLevels);
         if (!SeedCrackState.hasObservationKey(observation.getKey())) {
             System.out.println("[obs-debug] commit item=" + stack.getItem()
                     + " bookshelves=" + bookshelves
@@ -116,7 +115,6 @@ public class EnchantScreenObserver {
                     + " clueIds=" + Arrays.toString(clueIds)
                     + " clueLv=" + Arrays.toString(clueLevels));
         }
-
         EnchantSeedCracker.submitObservation(observation);
     }
 
@@ -130,19 +128,17 @@ public class EnchantScreenObserver {
             if (server == null) {
                 return null;
             }
-
             ServerPlayer serverPlayer = server.getPlayerList().getPlayer(mc.player.getUUID());
             if (serverPlayer == null) {
                 return null;
             }
-
             return serverPlayer.getEnchantmentSeed();
         }
 
         return mc.player.getEnchantmentSeed();
     }
 
-    private static int resolveBookshelves(Minecraft mc, EnchantmentMenu clientMenu) {
+    private static Integer resolveBookshelves(Minecraft mc, EnchantmentMenu clientMenu) {
         Integer serverBookshelves = tryResolveServerBookshelves(mc);
         if (serverBookshelves != null) {
             return serverBookshelves;
@@ -153,7 +149,7 @@ public class EnchantScreenObserver {
             return clientBookshelves;
         }
 
-        return 0;
+        return tryResolveNearbyClientBookshelves(mc);
     }
 
     private static Integer tryResolveServerBookshelves(Minecraft mc) {
@@ -197,6 +193,41 @@ public class EnchantScreenObserver {
         } catch (ReflectiveOperationException e) {
             return null;
         }
+    }
+
+    private static Integer tryResolveNearbyClientBookshelves(Minecraft mc) {
+        if (mc.level == null || mc.player == null) {
+            return null;
+        }
+
+        BlockPos playerPos = mc.player.blockPosition();
+        BlockPos bestTable = null;
+        double bestDistanceSquared = Double.MAX_VALUE;
+
+        for (BlockPos pos : BlockPos.betweenClosed(
+                playerPos.offset(-8, -4, -8),
+                playerPos.offset(8, 4, 8))) {
+            if (!mc.level.getBlockState(pos).is(Blocks.ENCHANTING_TABLE)) {
+                continue;
+            }
+
+            double dx = (pos.getX() + 0.5D) - mc.player.getX();
+            double dy = (pos.getY() + 0.5D) - mc.player.getY();
+            double dz = (pos.getZ() + 0.5D) - mc.player.getZ();
+            double distanceSquared = dx * dx + dy * dy + dz * dz;
+            if (distanceSquared >= bestDistanceSquared) {
+                continue;
+            }
+
+            bestDistanceSquared = distanceSquared;
+            bestTable = pos.immutable();
+        }
+
+        if (bestTable == null) {
+            return null;
+        }
+
+        return countBookshelvesAtTable(mc.level, bestTable);
     }
 
     private static Integer countBookshelvesAtTable(Level level, BlockPos tablePos) {
