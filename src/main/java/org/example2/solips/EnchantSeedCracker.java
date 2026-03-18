@@ -4,8 +4,10 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.core.Holder;
 import net.minecraft.core.Registry;
 import net.minecraft.core.RegistryAccess;
+import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.tags.EnchantmentTags;
+import net.minecraft.resources.ResourceLocation;
 import net.minecraft.util.RandomSource;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.inventory.DataSlot;
@@ -29,6 +31,9 @@ public final class EnchantSeedCracker {
     private static volatile int workerEpoch = Integer.MIN_VALUE;
 
     private static final int[] CLUE_SLOT_ORDER = new int[]{2, 1, 0};
+
+    private static final ResourceLocation DEPTH_STRIDER_ID = ResourceLocation.withDefaultNamespace("depth_strider");
+    private static final ResourceLocation UNBREAKING_ID = ResourceLocation.withDefaultNamespace("unbreaking");
 
     private static volatile Method reflectedGetEnchantmentList;
     private static volatile Field reflectedEnchantmentSeedField;
@@ -463,6 +468,40 @@ public final class EnchantSeedCracker {
         return new CostDebugResult(true, -1, actualCosts);
     }
 
+
+    private static boolean shouldIgnoreObservedClue(
+            PreparedObservation observation,
+            int slot,
+            Registry<Enchantment> enchantmentRegistry
+    ) {
+        int observedClueId = observation.clueIds[slot];
+        if (observedClueId < 0) {
+            return false;
+        }
+
+        Enchantment observed = enchantmentRegistry.byId(observedClueId);
+        if (observed == null) {
+            return false;
+        }
+
+        ResourceLocation observedKey = enchantmentRegistry.getKey(observed);
+        if (observedKey == null) {
+            return false;
+        }
+
+        ResourceLocation itemKey = BuiltInRegistries.ITEM.getKey(observation.stack.getItem());
+        if (itemKey == null) {
+            return false;
+        }
+
+        String itemPath = itemKey.getPath();
+        if (itemPath.endsWith("_boots") && DEPTH_STRIDER_ID.equals(observedKey)) {
+            return true;
+        }
+
+        return itemPath.endsWith("_sword") && UNBREAKING_ID.equals(observedKey);
+    }
+
     private static boolean matchesCluesFast(
             int seed,
             PreparedObservation observation,
@@ -478,6 +517,10 @@ public final class EnchantSeedCracker {
 
         for (int slot : CLUE_SLOT_ORDER) {
             if (observation.costs[slot] <= 0) {
+                continue;
+            }
+
+            if (shouldIgnoreObservedClue(observation, slot, enchantmentRegistry)) {
                 continue;
             }
 
@@ -513,6 +556,10 @@ public final class EnchantSeedCracker {
     ) {
         for (int slot : CLUE_SLOT_ORDER) {
             if (observation.costs[slot] <= 0) {
+                continue;
+            }
+
+            if (shouldIgnoreObservedClue(observation, slot, enchantmentRegistry)) {
                 continue;
             }
 
@@ -576,6 +623,10 @@ public final class EnchantSeedCracker {
                 continue;
             }
 
+            if (shouldIgnoreObservedClue(observation, slot, enchantmentRegistry)) {
+                continue;
+            }
+
             List<EnchantmentInstance> list = getMenuEnchantmentList(menu, registryAccess, observation.stack, slot, observation.costs[slot]);
             if (list == null || list.isEmpty()) {
                 return new ClueDebugResult(false, slot, actualClueIds, actualClueLevels);
@@ -612,6 +663,10 @@ public final class EnchantSeedCracker {
 
         for (int slot = 0; slot < 3; slot++) {
             if (observation.costs[slot] <= 0) {
+                continue;
+            }
+
+            if (shouldIgnoreObservedClue(observation, slot, enchantmentRegistry)) {
                 continue;
             }
 

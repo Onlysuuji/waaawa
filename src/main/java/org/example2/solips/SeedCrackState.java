@@ -312,6 +312,21 @@ public final class SeedCrackState {
         solvedSeed = 0;
     }
 
+    public static synchronized void updateCostScanProgress(long newCursor, int provisionalCostMatched, int expectedEpoch) {
+        if (resetEpoch != expectedEpoch) {
+            return;
+        }
+
+        cursor = Math.max(cursor, Math.min(newCursor, TOTAL_SEEDS));
+        phase = Phase.COST_SCAN;
+        phaseChecked = cursor;
+        phaseTotal = TOTAL_SEEDS;
+        costMatched = Math.max(costCandidates.size(), provisionalCostMatched);
+        matched = finalCandidates.size();
+        solved = false;
+        solvedSeed = 0;
+    }
+
     public static synchronized void replaceCostCandidates(List<Integer> newCandidates, int expectedEpoch) {
         if (resetEpoch != expectedEpoch) {
             return;
