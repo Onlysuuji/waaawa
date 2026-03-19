@@ -48,7 +48,7 @@ public final class ManualResetKeyHandler {
         }
     }
 
-    @EventBusSubscriber(modid = Solips.MODID, value = Dist.CLIENT, bus = EventBusSubscriber.Bus.MOD)
+    @EventBusSubscriber(modid = Solips.MODID, value = Dist.CLIENT)
     public static final class ModBusEvents {
         private ModBusEvents() {
         }

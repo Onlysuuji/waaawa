@@ -6,6 +6,7 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.inventory.ContainerLevelAccess;
 import net.minecraft.world.inventory.EnchantmentMenu;
+import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.Blocks;
@@ -24,6 +25,7 @@ public class EnchantScreenObserver {
     private static final int TABLE_SEARCH_VERTICAL_RADIUS = 4;
     private static final long LOOK_HINT_MAX_AGE_TICKS = 40L;
     private static final double MAX_TABLE_DISTANCE_SQUARED = 64.0D;
+    private static final int ITEM_CHANGE_REFRESH_WAIT_TICKS = 8;
 
     private static boolean wasInEnchantScreen = false;
     private static String pendingKey = null;
@@ -34,14 +36,29 @@ public class EnchantScreenObserver {
     private static long lastLookedEnchantTableTick = Long.MIN_VALUE;
     private static BlockPos activeEnchantTablePos = null;
 
+    private static Item lastSeenItem = null;
+    private static String lastRawMenuFingerprint = null;
+    private static boolean waitingForFreshMenuAfterItemChange = false;
+    private static String itemChangeBaselineMenuFingerprint = null;
+    private static int itemChangeWaitTicks = 0;
+
     private static void resetPending() {
         pendingKey = null;
         pendingTicks = 0;
     }
 
+    private static void resetItemChangeGuard() {
+        lastSeenItem = null;
+        lastRawMenuFingerprint = null;
+        waitingForFreshMenuAfterItemChange = false;
+        itemChangeBaselineMenuFingerprint = null;
+        itemChangeWaitTicks = 0;
+    }
+
     public static void clearClientObservationState() {
         ObservedEnchantState.clear();
         resetPending();
+        resetItemChangeGuard();
         wasInEnchantScreen = false;
         activeEnchantTablePos = null;
     }
@@ -93,6 +110,14 @@ public class EnchantScreenObserver {
             return;
         }
 
+        if (lastSeenItem != stack.getItem()) {
+            lastSeenItem = stack.getItem();
+            waitingForFreshMenuAfterItemChange = true;
+            itemChangeBaselineMenuFingerprint = lastRawMenuFingerprint;
+            itemChangeWaitTicks = 0;
+            resetPending();
+        }
+
         int[] costs = new int[3];
         int[] clueIds = new int[3];
         int[] clueLevels = new int[3];
@@ -107,6 +132,25 @@ public class EnchantScreenObserver {
         }
         if (!usable) {
             return;
+        }
+
+        String menuFingerprint = buildMenuFingerprint(costs, clueIds, clueLevels);
+        lastRawMenuFingerprint = menuFingerprint;
+
+        if (waitingForFreshMenuAfterItemChange) {
+            itemChangeWaitTicks++;
+
+            boolean changedFromPreviousItemMenu = itemChangeBaselineMenuFingerprint == null
+                    || !menuFingerprint.equals(itemChangeBaselineMenuFingerprint);
+
+            if (!changedFromPreviousItemMenu && itemChangeWaitTicks < ITEM_CHANGE_REFRESH_WAIT_TICKS) {
+                return;
+            }
+
+            waitingForFreshMenuAfterItemChange = false;
+            itemChangeBaselineMenuFingerprint = null;
+            itemChangeWaitTicks = 0;
+            resetPending();
         }
 
         Integer resolvedBookshelves = resolveBookshelves(mc, menu);
@@ -133,6 +177,12 @@ public class EnchantScreenObserver {
         ObservedEnchantState.set(stack.getItem(), bookshelves, costs, clueIds, clueLevels);
         ObservationRecord observation = new ObservationRecord(stack.getItem(), bookshelves, costs, clueIds, clueLevels);
         EnchantSeedCracker.submitObservation(observation);
+    }
+
+    private static String buildMenuFingerprint(int[] costs, int[] clueIds, int[] clueLevels) {
+        return costs[0] + "," + costs[1] + "," + costs[2] + "|"
+                + clueIds[0] + "," + clueIds[1] + "," + clueIds[2] + "|"
+                + clueLevels[0] + "," + clueLevels[1] + "," + clueLevels[2];
     }
 
     private static void logObservation(ItemStack stack, int bookshelves, int[] costs, int[] clueIds, int[] clueLevels) {
