@@ -1,3 +1,4 @@
+
 package org.example2.solips;
 
 import net.minecraft.client.Minecraft;
@@ -9,6 +10,7 @@ import net.minecraft.world.inventory.EnchantmentMenu;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.phys.BlockHitResult;
 import net.neoforged.api.distmarker.Dist;
 import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.fml.common.EventBusSubscriber;
@@ -19,10 +21,19 @@ import java.util.Arrays;
 
 @EventBusSubscriber(modid = Solips.MODID, value = Dist.CLIENT)
 public class EnchantScreenObserver {
+    private static final int TABLE_SEARCH_HORIZONTAL_RADIUS = 6;
+    private static final int TABLE_SEARCH_VERTICAL_RADIUS = 4;
+    private static final long LOOK_HINT_MAX_AGE_TICKS = 40L;
+    private static final double MAX_TABLE_DISTANCE_SQUARED = 64.0D;
+
     private static boolean wasInEnchantScreen = false;
     private static String pendingKey = null;
     private static int pendingTicks = 0;
     private static volatile Field reflectedAccessField;
+
+    private static BlockPos lastLookedEnchantTablePos = null;
+    private static long lastLookedEnchantTableTick = Long.MIN_VALUE;
+    private static BlockPos activeEnchantTablePos = null;
 
     private static void resetPending() {
         pendingKey = null;
@@ -33,11 +44,16 @@ public class EnchantScreenObserver {
         ObservedEnchantState.clear();
         resetPending();
         wasInEnchantScreen = false;
+        activeEnchantTablePos = null;
     }
 
     @SubscribeEvent
     public static void onClientTick(ClientTickEvent.Post event) {
         Minecraft mc = Minecraft.getInstance();
+
+        if (!(mc.screen instanceof EnchantmentScreen)) {
+            updateTableLookHint(mc);
+        }
 
         if (!ClientFeatureToggle.isEnabled()) {
             if (wasInEnchantScreen || pendingKey != null || ObservedEnchantState.snapshot() != null) {
@@ -125,6 +141,19 @@ public class EnchantScreenObserver {
         EnchantSeedCracker.submitObservation(observation);
     }
 
+    private static void updateTableLookHint(Minecraft mc) {
+        if (mc.level == null || mc.player == null) {
+            return;
+        }
+        if (mc.hitResult instanceof BlockHitResult blockHitResult) {
+            BlockPos pos = blockHitResult.getBlockPos();
+            if (mc.level.getBlockState(pos).is(Blocks.ENCHANTING_TABLE)) {
+                lastLookedEnchantTablePos = pos.immutable();
+                lastLookedEnchantTableTick = mc.level.getGameTime();
+            }
+        }
+    }
+
     private static Integer getAuthoritativeEnchantSeed(Minecraft mc) {
         if (mc.player == null) {
             return null;
@@ -149,9 +178,18 @@ public class EnchantScreenObserver {
             return serverBookshelves;
         }
 
+        BlockPos menuTablePos = tryResolveMenuTablePos(clientMenu);
+        if (menuTablePos != null) {
+            activeEnchantTablePos = menuTablePos;
+        }
+
         Integer clientBookshelves = tryResolveMenuBookshelves(clientMenu);
         if (clientBookshelves != null) {
             return clientBookshelves;
+        }
+
+        if (mc.level != null && activeEnchantTablePos != null && isValidEnchantTable(mc.level, mc, activeEnchantTablePos)) {
+            return countBookshelvesAtTable(mc.level, activeEnchantTablePos);
         }
 
         return tryResolveNearbyClientBookshelves(mc);
@@ -181,23 +219,47 @@ public class EnchantScreenObserver {
 
     private static Integer tryResolveMenuBookshelves(EnchantmentMenu menu) {
         try {
-            Field field = reflectedAccessField;
-            if (field == null) {
-                field = EnchantmentMenu.class.getDeclaredField("access");
-                field.setAccessible(true);
-                reflectedAccessField = field;
-            }
-
+            Field field = getAccessField();
             ContainerLevelAccess access = (ContainerLevelAccess) field.get(menu);
             if (access == null) {
                 return null;
             }
 
-            Integer value = access.evaluate(EnchantScreenObserver::countBookshelvesAtTable, Integer.valueOf(-1));
+            Integer value = access.evaluate((level, pos) -> {
+                if (level == null || pos == null) {
+                    return Integer.valueOf(-1);
+                }
+                return countBookshelvesAtTable(level, pos);
+            }, Integer.valueOf(-1));
+
             return value != null && value >= 0 ? value : null;
         } catch (ReflectiveOperationException e) {
             return null;
         }
+    }
+
+    private static BlockPos tryResolveMenuTablePos(EnchantmentMenu menu) {
+        try {
+            Field field = getAccessField();
+            ContainerLevelAccess access = (ContainerLevelAccess) field.get(menu);
+            if (access == null) {
+                return null;
+            }
+
+            return access.evaluate((level, pos) -> pos == null ? null : pos.immutable(), null);
+        } catch (ReflectiveOperationException e) {
+            return null;
+        }
+    }
+
+    private static Field getAccessField() throws NoSuchFieldException {
+        Field field = reflectedAccessField;
+        if (field == null) {
+            field = EnchantmentMenu.class.getDeclaredField("access");
+            field.setAccessible(true);
+            reflectedAccessField = field;
+        }
+        return field;
     }
 
     private static Integer tryResolveNearbyClientBookshelves(Minecraft mc) {
@@ -205,23 +267,45 @@ public class EnchantScreenObserver {
             return null;
         }
 
+        BlockPos selectedTable = selectNearbyEnchantTable(mc);
+        if (selectedTable == null) {
+            return null;
+        }
+
+        activeEnchantTablePos = selectedTable;
+        return countBookshelvesAtTable(mc.level, selectedTable);
+    }
+
+    private static BlockPos selectNearbyEnchantTable(Minecraft mc) {
+        Level level = mc.level;
+        if (level == null || mc.player == null) {
+            return null;
+        }
+
+        if (activeEnchantTablePos != null && isValidEnchantTable(level, mc, activeEnchantTablePos)) {
+            return activeEnchantTablePos;
+        }
+
+        if (lastLookedEnchantTablePos != null
+                && (level.getGameTime() - lastLookedEnchantTableTick) <= LOOK_HINT_MAX_AGE_TICKS
+                && isValidEnchantTable(level, mc, lastLookedEnchantTablePos)) {
+            return lastLookedEnchantTablePos;
+        }
+
         BlockPos playerPos = mc.player.blockPosition();
         BlockPos bestTable = null;
         double bestDistanceSquared = Double.MAX_VALUE;
 
         for (BlockPos pos : BlockPos.betweenClosed(
-                playerPos.offset(-8, -4, -8),
-                playerPos.offset(8, 4, 8)
+                playerPos.offset(-TABLE_SEARCH_HORIZONTAL_RADIUS, -TABLE_SEARCH_VERTICAL_RADIUS, -TABLE_SEARCH_HORIZONTAL_RADIUS),
+                playerPos.offset(TABLE_SEARCH_HORIZONTAL_RADIUS, TABLE_SEARCH_VERTICAL_RADIUS, TABLE_SEARCH_HORIZONTAL_RADIUS)
         )) {
-            if (!mc.level.getBlockState(pos).is(Blocks.ENCHANTING_TABLE)) {
+            if (!level.getBlockState(pos).is(Blocks.ENCHANTING_TABLE)) {
                 continue;
             }
 
-            double dx = (pos.getX() + 0.5D) - mc.player.getX();
-            double dy = (pos.getY() + 0.5D) - mc.player.getY();
-            double dz = (pos.getZ() + 0.5D) - mc.player.getZ();
-            double distanceSquared = dx * dx + dy * dy + dz * dz;
-            if (distanceSquared >= bestDistanceSquared) {
+            double distanceSquared = getPlayerDistanceSquared(mc, pos);
+            if (distanceSquared > MAX_TABLE_DISTANCE_SQUARED || distanceSquared >= bestDistanceSquared) {
                 continue;
             }
 
@@ -229,11 +313,24 @@ public class EnchantScreenObserver {
             bestTable = pos.immutable();
         }
 
-        if (bestTable == null) {
-            return null;
-        }
+        return bestTable;
+    }
 
-        return countBookshelvesAtTable(mc.level, bestTable);
+    private static boolean isValidEnchantTable(Level level, Minecraft mc, BlockPos pos) {
+        return level != null
+                && pos != null
+                && level.getBlockState(pos).is(Blocks.ENCHANTING_TABLE)
+                && getPlayerDistanceSquared(mc, pos) <= MAX_TABLE_DISTANCE_SQUARED;
+    }
+
+    private static double getPlayerDistanceSquared(Minecraft mc, BlockPos pos) {
+        if (mc.player == null) {
+            return Double.MAX_VALUE;
+        }
+        double dx = (pos.getX() + 0.5D) - mc.player.getX();
+        double dy = (pos.getY() + 0.5D) - mc.player.getY();
+        double dz = (pos.getZ() + 0.5D) - mc.player.getZ();
+        return dx * dx + dy * dy + dz * dz;
     }
 
     private static Integer countBookshelvesAtTable(Level level, BlockPos tablePos) {
