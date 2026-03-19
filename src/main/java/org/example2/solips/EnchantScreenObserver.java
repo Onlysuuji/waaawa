@@ -1,4 +1,3 @@
-
 package org.example2.solips;
 
 import net.minecraft.client.Minecraft;
@@ -129,16 +128,19 @@ public class EnchantScreenObserver {
             return;
         }
 
+        logObservation(stack, bookshelves, costs, clueIds, clueLevels);
+
         ObservedEnchantState.set(stack.getItem(), bookshelves, costs, clueIds, clueLevels);
         ObservationRecord observation = new ObservationRecord(stack.getItem(), bookshelves, costs, clueIds, clueLevels);
-        if (!SeedCrackState.hasObservationKey(observation.getKey())) {
-            System.out.println("[obs-debug] commit item=" + stack.getItem()
-                    + " bookshelves=" + bookshelves
-                    + " costs=" + Arrays.toString(costs)
-                    + " clueIds=" + Arrays.toString(clueIds)
-                    + " clueLv=" + Arrays.toString(clueLevels));
-        }
         EnchantSeedCracker.submitObservation(observation);
+    }
+
+    private static void logObservation(ItemStack stack, int bookshelves, int[] costs, int[] clueIds, int[] clueLevels) {
+        System.out.println("[obs-read] item=" + stack.getItem()
+                + " bookshelves=" + bookshelves
+                + " costs=" + Arrays.toString(costs)
+                + " clueIds=" + Arrays.toString(clueIds)
+                + " clueLv=" + Arrays.toString(clueLevels));
     }
 
     private static void updateTableLookHint(Minecraft mc) {
