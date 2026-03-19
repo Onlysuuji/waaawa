@@ -199,6 +199,19 @@ public final class SeedCrackState {
         return resetEpoch == expectedEpoch && !queuedObservations.isEmpty();
     }
 
+    public static synchronized boolean hasQueuedUnprocessedCostObservation(int expectedEpoch) {
+        if (resetEpoch != expectedEpoch) {
+            return false;
+        }
+
+        for (ObservationRecord record : queuedObservations) {
+            if (!processedCostKeys.contains(record.getCostKey())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     public static synchronized void markCostKeyProcessed(String costKey, int expectedEpoch) {
         if (resetEpoch != expectedEpoch) {
             return;

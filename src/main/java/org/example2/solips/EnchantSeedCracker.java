@@ -113,6 +113,24 @@ public final class EnchantSeedCracker {
         }
     }
 
+    private static final class ClueFilterResult {
+        final int[] nextSource;
+        final boolean interruptedByQueuedCost;
+
+        ClueFilterResult(int[] nextSource, boolean interruptedByQueuedCost) {
+            this.nextSource = nextSource;
+            this.interruptedByQueuedCost = interruptedByQueuedCost;
+        }
+
+        static ClueFilterResult completed(int[] nextSource) {
+            return new ClueFilterResult(nextSource, false);
+        }
+
+        static ClueFilterResult interrupted(int[] nextSource) {
+            return new ClueFilterResult(nextSource, true);
+        }
+    }
+
     private static final ThreadLocal<ScratchMenuHolder> SCRATCH_MENU =
             ThreadLocal.withInitial(ScratchMenuHolder::new);
 
@@ -266,9 +284,12 @@ public final class EnchantSeedCracker {
                     activated.addAll(moreActivated);
                 }
 
-                applyPendingClueConstraints(expectedEpoch, registryAccess, enchantmentRegistry, holders);
+                boolean clueCompleted = applyPendingClueConstraints(expectedEpoch, registryAccess, enchantmentRegistry, holders);
                 if (SeedCrackState.getResetEpoch() != expectedEpoch) {
                     return;
+                }
+                if (!clueCompleted) {
+                    continue;
                 }
 
                 SeedCrackState.finishObservationRun(expectedEpoch);
@@ -499,7 +520,7 @@ public final class EnchantSeedCracker {
         }
     }
 
-    private static void applyPendingClueConstraints(
+    private static boolean applyPendingClueConstraints(
             int expectedEpoch,
             RegistryAccess registryAccess,
             Registry<Enchantment> enchantmentRegistry,
@@ -524,13 +545,13 @@ public final class EnchantSeedCracker {
 
         for (ObservationRecord record : clueTargets) {
             if (SeedCrackState.getResetEpoch() != expectedEpoch) {
-                return;
+                return false;
             }
             if (SeedCrackState.hasProcessedClueObservationKey(record.getKey())) {
                 continue;
             }
 
-            source = clueFilterFromSource(
+            ClueFilterResult result = clueFilterFromSource(
                     source,
                     new PreparedObservation(record),
                     registryAccess,
@@ -540,16 +561,21 @@ public final class EnchantSeedCracker {
             );
 
             if (SeedCrackState.getResetEpoch() != expectedEpoch) {
-                return;
+                return false;
+            }
+            if (result.interruptedByQueuedCost) {
+                return false;
             }
 
+            source = result.nextSource;
             SeedCrackState.markObservationClueProcessed(record.getKey(), expectedEpoch);
         }
 
         SeedCrackState.markClueFilterInitialized(expectedEpoch);
+        return true;
     }
 
-    private static int[] clueFilterFromSource(
+    private static ClueFilterResult clueFilterFromSource(
             int[] source,
             PreparedObservation observation,
             RegistryAccess registryAccess,
@@ -566,7 +592,11 @@ public final class EnchantSeedCracker {
 
         while (processed < source.length) {
             if (SeedCrackState.getResetEpoch() != expectedEpoch) {
-                return new int[0];
+                return ClueFilterResult.interrupted(source);
+            }
+            if (shouldInterruptClueFilterForQueuedCost(expectedEpoch)) {
+                restoreClueSourceAfterInterruption(source, expectedEpoch);
+                return ClueFilterResult.interrupted(source);
             }
 
             int seed = source[processed];
@@ -582,8 +612,25 @@ public final class EnchantSeedCracker {
             }
         }
 
+        if (shouldInterruptClueFilterForQueuedCost(expectedEpoch)) {
+            restoreClueSourceAfterInterruption(source, expectedEpoch);
+            return ClueFilterResult.interrupted(source);
+        }
+
         SeedCrackState.appendFinalMatches(finalBatch.toArray(), finalBatch.size(), processed, source.length, expectedEpoch);
-        return next.toArray();
+        return ClueFilterResult.completed(next.toArray());
+    }
+
+    private static boolean shouldInterruptClueFilterForQueuedCost(int expectedEpoch) {
+        return SeedCrackState.hasQueuedUnprocessedCostObservation(expectedEpoch);
+    }
+
+    private static void restoreClueSourceAfterInterruption(int[] source, int expectedEpoch) {
+        if (SeedCrackState.isClueFilterInitialized()) {
+            SeedCrackState.replaceFinalCandidates(source, source.length, expectedEpoch);
+        } else {
+            SeedCrackState.clearFinalCandidates(expectedEpoch);
+        }
     }
 
     private static boolean matchesCosts(PreparedObservation observation, int seed) {

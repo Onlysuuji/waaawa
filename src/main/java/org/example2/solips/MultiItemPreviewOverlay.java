@@ -1,24 +1,34 @@
 package org.example2.solips;
 
+import com.mojang.blaze3d.pipeline.RenderTarget;
+import com.mojang.blaze3d.pipeline.TextureTarget;
+import com.mojang.blaze3d.platform.Lighting;
+import com.mojang.blaze3d.platform.NativeImage;
+import com.mojang.blaze3d.vertex.VertexSorting;
+import com.mojang.blaze3d.systems.RenderSystem;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.Font;
 import net.minecraft.client.gui.GuiGraphics;
+import net.minecraft.client.renderer.texture.DynamicTexture;
 import net.minecraft.core.Holder;
 import net.minecraft.core.Registry;
 import net.minecraft.core.RegistryAccess;
 import net.minecraft.core.component.DataComponents;
 import net.minecraft.core.registries.Registries;
+import net.minecraft.resources.ResourceLocation;
 import net.minecraft.tags.EnchantmentTags;
+import net.minecraft.util.RandomSource;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.item.enchantment.Enchantment;
 import net.minecraft.world.item.enchantment.EnchantmentHelper;
-import net.minecraft.util.RandomSource;
 import net.neoforged.api.distmarker.Dist;
 import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.fml.common.EventBusSubscriber;
 import net.neoforged.neoforge.client.event.RenderGuiLayerEvent;
+import org.joml.Matrix4f;
+import org.joml.Matrix4fStack;
 
 import java.lang.reflect.Method;
 import java.util.List;
@@ -27,10 +37,16 @@ import java.util.stream.StreamSupport;
 @EventBusSubscriber(modid = Solips.MODID, value = Dist.CLIENT)
 public class MultiItemPreviewOverlay {
     private static final Item[] PREVIEW_ITEMS = new Item[] {
+            Items.DIAMOND_PICKAXE,
             Items.IRON_PICKAXE,
             Items.GOLDEN_PICKAXE,
+            Items.DIAMOND_SWORD,
             Items.IRON_SWORD,
             Items.GOLDEN_SWORD,
+            Items.DIAMOND_HELMET,
+            Items.DIAMOND_CHESTPLATE,
+            Items.DIAMOND_LEGGINGS,
+            Items.DIAMOND_BOOTS,
             Items.IRON_HELMET,
             Items.IRON_CHESTPLATE,
             Items.IRON_LEGGINGS,
@@ -44,6 +60,14 @@ public class MultiItemPreviewOverlay {
     private static final int CELL_WIDTH = 22;
     private static final int CELL_HEIGHT = 20;
     private static final int GRID_MARGIN = 4;
+    private static final int GRID_COLUMNS = 7;
+    private static final int GRID_ROWS = 1 + PREVIEW_ITEMS.length;
+    private static final int GRID_WIDTH = GRID_COLUMNS * CELL_WIDTH;
+    private static final int GRID_HEIGHT = GRID_ROWS * CELL_HEIGHT;
+    private static final int ITEM_X_OFFSET = 3;
+    private static final int ITEM_Y_OFFSET = 2;
+    private static final int TRANSPARENT_KEY_RGB = 0x00FF00FF;
+
     private static final int HEADER_COLOR = 0xFFFFFF;
     private static final int HUD_LABEL_COLOR = 0xAAAAAA;
     private static final int HUD_TEXT_COLOR = 0xFFFFFF;
@@ -61,9 +85,14 @@ public class MultiItemPreviewOverlay {
 
     private static int previewSeed = Integer.MIN_VALUE;
     private static boolean previewValid = false;
+    private static boolean previewImageReady = false;
 
     private static int cachedSingleplayerSeed = Integer.MIN_VALUE;
     private static long nextSingleplayerSeedRefreshTick = 0L;
+
+    private static TextureTarget previewRenderTarget;
+    private static DynamicTexture previewTexture;
+    private static ResourceLocation previewTextureLocation;
 
     private static volatile Method featureToggleMethod;
     private static volatile boolean featureToggleResolved = false;
@@ -105,7 +134,7 @@ public class MultiItemPreviewOverlay {
         }
 
         if (previewValid) {
-            renderRightTopGrid(mc, graphics, font);
+            renderRightTopPreview(mc, graphics, font);
         }
     }
 
@@ -176,13 +205,22 @@ public class MultiItemPreviewOverlay {
         }
     }
 
-    private static void renderRightTopGrid(Minecraft mc, GuiGraphics graphics, Font font) {
-        int columns = 7;
-        int rows = 1 + PREVIEW_ITEMS.length;
-        int gridWidth = columns * CELL_WIDTH;
-        int startX = mc.getWindow().getGuiScaledWidth() - gridWidth - GRID_MARGIN;
-        int startY = GRID_MARGIN;
+    private static void renderRightTopPreview(Minecraft mc, GuiGraphics graphics, Font font) {
+        if (previewImageReady && previewTextureLocation != null) {
+            int startX = mc.getWindow().getGuiScaledWidth() - GRID_WIDTH - GRID_MARGIN;
+            int startY = GRID_MARGIN;
+            RenderSystem.enableBlend();
+            RenderSystem.defaultBlendFunc();
+            RenderSystem.setShaderColor(1.0F, 1.0F, 1.0F, 1.0F);
+            graphics.blit(previewTextureLocation, startX, startY, 0.0F, 0.0F, GRID_WIDTH, GRID_HEIGHT, GRID_WIDTH, GRID_HEIGHT);
+            RenderSystem.disableBlend();
+            return;
+        }
 
+        renderRightTopGrid(graphics, font, mc.getWindow().getGuiScaledWidth() - GRID_WIDTH - GRID_MARGIN, GRID_MARGIN);
+    }
+
+    private static void renderRightTopGrid(GuiGraphics graphics, Font font, int startX, int startY) {
         drawCenteredString(graphics, font, "", startX, startY, CELL_WIDTH, CELL_HEIGHT, HEADER_COLOR);
         for (int col = 0; col < 6; col++) {
             drawCenteredString(
@@ -199,14 +237,14 @@ public class MultiItemPreviewOverlay {
 
         for (int row = 0; row < PREVIEW_ITEMS.length; row++) {
             int y = startY + (row + 1) * CELL_HEIGHT;
-            graphics.renderItem(rowIconStacks[row], startX + 3, y + 2);
+            graphics.renderItem(rowIconStacks[row], startX + ITEM_X_OFFSET, y + ITEM_Y_OFFSET);
             for (int col = 0; col < 6; col++) {
                 ItemStack stack = previewStacks[row][col];
                 if (stack.isEmpty()) {
                     continue;
                 }
                 int cellX = startX + (col + 1) * CELL_WIDTH;
-                graphics.renderItem(stack, cellX + 3, y + 2);
+                graphics.renderItem(stack, cellX + ITEM_X_OFFSET, y + ITEM_Y_OFFSET);
             }
         }
     }
@@ -227,9 +265,9 @@ public class MultiItemPreviewOverlay {
 
         fillHeaderCosts(seed);
         fillPreviewStacks(seed, holders);
-
         previewSeed = seed;
         previewValid = true;
+        previewImageReady = buildPreviewImage(mc);
     }
 
     private static void fillHeaderCosts(int seed) {
@@ -282,6 +320,118 @@ public class MultiItemPreviewOverlay {
 
         enchanted.set(DataComponents.ENCHANTMENT_GLINT_OVERRIDE, false);
         return enchanted;
+    }
+
+    private static boolean buildPreviewImage(Minecraft mc) {
+        try {
+            ensurePreviewRenderTarget();
+            ensurePreviewTexture(mc);
+
+            RenderTarget mainRenderTarget = mc.getMainRenderTarget();
+            previewRenderTarget.setClearColor(1.0F, 0.0F, 1.0F, 0.0F);
+            previewRenderTarget.clear(Minecraft.ON_OSX);
+            previewRenderTarget.bindWrite(true);
+            RenderSystem.viewport(0, 0, GRID_WIDTH, GRID_HEIGHT);
+
+            RenderSystem.backupProjectionMatrix();
+            Matrix4f projection = new Matrix4f().setOrtho(0.0F, (float) GRID_WIDTH, (float) GRID_HEIGHT, 0.0F, 1000.0F, 3000.0F);
+            RenderSystem.setProjectionMatrix(projection, VertexSorting.ORTHOGRAPHIC_Z);
+
+            Matrix4fStack modelViewStack = RenderSystem.getModelViewStack();
+            modelViewStack.pushMatrix();
+            modelViewStack.identity();
+            modelViewStack.translate(0.0F, 0.0F, -2000.0F);
+            RenderSystem.applyModelViewMatrix();
+            Lighting.setupFor3DItems();
+
+            GuiGraphics offscreen = new GuiGraphics(mc, mc.renderBuffers().bufferSource());
+            renderRightTopGrid(offscreen, mc.font, 0, 0);
+            offscreen.flush();
+
+            modelViewStack.popMatrix();
+            RenderSystem.applyModelViewMatrix();
+            RenderSystem.restoreProjectionMatrix();
+
+            NativeImage image = new NativeImage(GRID_WIDTH, GRID_HEIGHT, true);
+            RenderSystem.bindTexture(previewRenderTarget.getColorTextureId());
+            image.downloadTexture(0, false);
+            image.flipY();
+            stripTransparentKey(image);
+
+            NativeImage pixels = previewTexture.getPixels();
+            if (pixels == null || pixels.getWidth() != GRID_WIDTH || pixels.getHeight() != GRID_HEIGHT) {
+                previewTexture.close();
+                previewTexture = new DynamicTexture(GRID_WIDTH, GRID_HEIGHT, true);
+                previewTextureLocation = mc.getTextureManager().register("solips_preview_grid", previewTexture);
+                pixels = previewTexture.getPixels();
+            }
+
+            if (pixels == null) {
+                image.close();
+                mainRenderTarget.bindWrite(true);
+                RenderSystem.viewport(0, 0, mc.getWindow().getWidth(), mc.getWindow().getHeight());
+                return false;
+            }
+
+            copyImage(image, pixels);
+            previewTexture.upload();
+            image.close();
+
+            mainRenderTarget.bindWrite(true);
+            RenderSystem.viewport(0, 0, mc.getWindow().getWidth(), mc.getWindow().getHeight());
+            return true;
+        } catch (Throwable ignored) {
+            try {
+                mc.getMainRenderTarget().bindWrite(true);
+                RenderSystem.viewport(0, 0, mc.getWindow().getWidth(), mc.getWindow().getHeight());
+                RenderSystem.restoreProjectionMatrix();
+            } catch (Throwable ignoredAgain) {
+            }
+            return false;
+        }
+    }
+
+    private static void stripTransparentKey(NativeImage image) {
+        for (int y = 0; y < image.getHeight(); y++) {
+            for (int x = 0; x < image.getWidth(); x++) {
+                int argb = image.getPixelRGBA(x, y);
+                if ((argb & 0x00FFFFFF) == TRANSPARENT_KEY_RGB) {
+                    image.setPixelRGBA(x, y, 0x00000000);
+                }
+            }
+        }
+    }
+
+    private static void copyImage(NativeImage from, NativeImage to) {
+        int width = Math.min(from.getWidth(), to.getWidth());
+        int height = Math.min(from.getHeight(), to.getHeight());
+        for (int y = 0; y < height; y++) {
+            for (int x = 0; x < width; x++) {
+                to.setPixelRGBA(x, y, from.getPixelRGBA(x, y));
+            }
+        }
+    }
+
+    private static void ensurePreviewRenderTarget() {
+        if (previewRenderTarget == null) {
+            previewRenderTarget = new TextureTarget(GRID_WIDTH, GRID_HEIGHT, true, true);
+        }
+    }
+
+    private static void ensurePreviewTexture(Minecraft mc) {
+        if (previewTexture == null) {
+            previewTexture = new DynamicTexture(GRID_WIDTH, GRID_HEIGHT, true);
+            previewTextureLocation = mc.getTextureManager().register("solips_preview_grid", previewTexture);
+            NativeImage pixels = previewTexture.getPixels();
+            if (pixels != null) {
+                for (int y = 0; y < pixels.getHeight(); y++) {
+                    for (int x = 0; x < pixels.getWidth(); x++) {
+                        pixels.setPixelRGBA(x, y, 0x00000000);
+                    }
+                }
+                previewTexture.upload();
+            }
+        }
     }
 
     private static Integer getCachedSingleplayerSeed(Minecraft mc) {
